@@ -362,6 +362,12 @@ def generate_transcript_segments_from_audio(
 
     for idx, chunk in enumerate(chunks):
         offset = idx * chunk_sec
+        if progress is not None:
+            try:
+                # Heartbeat before the potentially-long OpenAI call.
+                progress(idx, total)
+            except Exception:
+                pass
         log.info("asr: chunk %d/%d file=%s bytes=%d", idx + 1, total, chunk.name, int(chunk.stat().st_size))
         with chunk.open("rb") as f:
             tr = client.audio.transcriptions.create(

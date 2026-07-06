@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Literal
 import subprocess
 import logging
+import json
+import threading
+from collections.abc import AsyncIterator
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import ALLOW_ORIGINS
@@ -39,6 +42,74 @@ from .yt import get_video_info
 app = FastAPI(title="tldr-youtube", version="0.1.0")
 
 log = logging.getLogger("uvicorn.error")
+
+# In-process tracker so we can tell if a "running" status is actually running in *this* container.
+_ACTIVE_GENERATIONS: set[str] = set()
+
+_STATUS_LOCK = threading.Lock()
+_STATUS_SUBS: dict[str, set[asyncio.Queue[dict]]] = {}
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    global _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
+
+    # "Enable everything" logging: crank up common library loggers.
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    for name in (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "fastapi",
+        "httpx",
+        "httpcore",
+        "openai",
+        "asyncio",
+    ):
+        logging.getLogger(name).setLevel(logging.DEBUG)
+
+
+def _q_put_drop_old(q: asyncio.Queue[dict], item: dict) -> None:
+    try:
+        q.put_nowait(item)
+        return
+    except asyncio.QueueFull:
+        try:
+            q.get_nowait()
+        except Exception:
+            pass
+        try:
+            q.put_nowait(item)
+        except Exception:
+            pass
+
+
+def _publish_status(video_id: str, payload: dict) -> None:
+    with _STATUS_LOCK:
+        subs = list(_STATUS_SUBS.get(video_id) or [])
+    if not subs:
+        return
+
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        return
+
+    def _do_put() -> None:
+        for q in subs:
+            _q_put_drop_old(q, payload)
+
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+
+    if running is loop:
+        _do_put()
+    else:
+        loop.call_soon_threadsafe(_do_put)
 
 app.add_middleware(
     CORSMiddleware,
@@ -109,7 +180,58 @@ def _merge_generation_status(video_id: str, patch: dict) -> dict:
     cur.update(patch)
     status["generation"] = cur
     write_json(p.status_json, status)
+    _publish_status(
+        video_id,
+        {
+            "videoId": video_id,
+            "status": status,
+            "hasTranscript": p.transcript_txt.exists(),
+            "hasSections": p.sections_json.exists(),
+        },
+    )
     return status
+
+
+@app.get("/api/video/{video_id}/status/stream")
+async def stream_video_status(video_id: str) -> StreamingResponse:
+    # SSE stream of status updates. Emits an initial snapshot immediately.
+    p = paths_for_video(video_id)
+    q: asyncio.Queue[dict] = asyncio.Queue(maxsize=50)
+
+    with _STATUS_LOCK:
+        _STATUS_SUBS.setdefault(video_id, set()).add(q)
+
+    async def gen() -> AsyncIterator[str]:
+        try:
+            # Initial snapshot.
+            status = read_json(p.status_json) if p.status_json.exists() else {"generation": {"state": "idle"}, "pdf": {"state": "idle"}}
+            init = {
+                "videoId": video_id,
+                "status": status,
+                "hasTranscript": p.transcript_txt.exists(),
+                "hasSections": p.sections_json.exists(),
+            }
+            yield f"data: {json.dumps(init)}\n\n"
+
+            while True:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {json.dumps(item)}\n\n"
+                    st = (item.get("status") or {}).get("generation") or {}
+                    if st.get("state") in ("done", "error"):
+                        return
+                except asyncio.TimeoutError:
+                    # Keepalive comment.
+                    yield ": ping\n\n"
+        finally:
+            with _STATUS_LOCK:
+                s = _STATUS_SUBS.get(video_id)
+                if s is not None:
+                    s.discard(q)
+                    if not s:
+                        _STATUS_SUBS.pop(video_id, None)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/health")
@@ -244,6 +366,7 @@ def get_video(video_id: str) -> dict:
 async def _generate_draft_job(video_id: str) -> None:
     p = paths_for_video(video_id)
     log.info("gen[%s] start dir=%s", video_id, p.root)
+    _ACTIVE_GENERATIONS.add(video_id)
     now = _now_iso()
     _merge_generation_status(
         video_id,
@@ -378,6 +501,8 @@ async def _generate_draft_job(video_id: str) -> None:
             },
         )
         log.exception("gen[%s] error step=%s", video_id, step)
+    finally:
+        _ACTIVE_GENERATIONS.discard(video_id)
 
 
 @app.post("/api/video/{video_id}/generate-draft")
@@ -389,7 +514,9 @@ def generate_draft(video_id: str, background: BackgroundTasks, force: bool = Fal
 
     status = read_json(p.status_json)
     gen = status.get("generation") or {}
-    # Legacy status files can get stuck at {state: running} forever after a server restart.
+    # Status files can get stuck at {state: running} after a server restart.
+    # We only treat it as "actually running" if there's an active job in this process.
+    actually_running_here = video_id in _ACTIVE_GENERATIONS
     legacy_stuck_running = gen.get("state") == "running" and not gen.get("startedAt")
     log.info(
         "gen[%s] request force=%s state=%s legacy_stuck_running=%s",
@@ -398,8 +525,11 @@ def generate_draft(video_id: str, background: BackgroundTasks, force: bool = Fal
         gen.get("state"),
         bool(legacy_stuck_running),
     )
-    if gen.get("state") == "running" and not (force or legacy_stuck_running):
+    if gen.get("state") == "running" and actually_running_here and not force:
         return {"ok": True, "status": status}
+
+    if gen.get("state") == "running" and not actually_running_here and not force:
+        log.info("gen[%s] found orphaned running status; re-queueing", video_id)
 
     background.add_task(_generate_draft_job, video_id)
     status["generation"] = {"state": "queued", "queuedAt": _now_iso()}

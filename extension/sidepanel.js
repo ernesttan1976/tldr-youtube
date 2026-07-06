@@ -271,17 +271,32 @@ async function saveMd() {
 async function generateDraft() {
   if (!current.videoId) throw new Error("Attach first");
 
-  const r = await api(`/api/video/${encodeURIComponent(current.videoId)}/generate-draft`, { method: "POST" });
-  setStatus(r.status);
-  // Poll for a while (ASR can take minutes on long videos).
-  const start = Date.now();
-  const maxMs = 10 * 60 * 1000;
-  while (Date.now() - start < maxMs) {
-    await new Promise((res) => setTimeout(res, 2500));
-    const st = await api(`/api/video/${encodeURIComponent(current.videoId)}`);
-    setStatus({ ...st.status, hasTranscript: st.hasTranscript, hasSections: st.hasSections });
-    if (st.status?.generation?.state === "done" || st.status?.generation?.state === "error") break;
-  }
+  const vid = encodeURIComponent(current.videoId);
+  const r = await api(`/api/video/${vid}/generate-draft`, { method: "POST" });
+  setStatus({ ...r.status, hasTranscript: false, hasSections: false });
+
+  // Stream status updates via SSE (no polling spam).
+  await new Promise((resolve) => {
+    const es = new EventSource(`${API}/api/video/${vid}/status/stream`);
+    const done = () => {
+      try { es.close(); } catch {}
+      resolve();
+    };
+
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data?.status) setStatus({ ...data.status, hasTranscript: data.hasTranscript, hasSections: data.hasSections });
+        const st = data?.status?.generation?.state;
+        if (st === "done" || st === "error") done();
+      } catch {
+        // ignore
+      }
+    };
+
+    es.onerror = () => done();
+  });
+
   await refresh();
 }
 
