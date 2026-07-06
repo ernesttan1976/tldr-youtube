@@ -15,7 +15,7 @@ from typing import Any, Callable
 import srt
 from openai import OpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, OPENAI_MAX_RETRIES, OPENAI_TIMEOUT_SEC
 from .storage import cookies_file
 
 
@@ -349,7 +349,7 @@ def generate_transcript_segments_from_audio(
     audio_mp3 = _ensure_asr_audio(url, video_dir)
     chunks = _make_asr_chunks(audio_mp3)
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SEC, max_retries=OPENAI_MAX_RETRIES)
 
     segments: list[TranscriptSegment] = []
     chunk_sec = 300.0
@@ -369,6 +369,7 @@ def generate_transcript_segments_from_audio(
             except Exception:
                 pass
         log.info("asr: chunk %d/%d file=%s bytes=%d", idx + 1, total, chunk.name, int(chunk.stat().st_size))
+        t0 = time.monotonic()
         with chunk.open("rb") as f:
             tr = client.audio.transcriptions.create(
                 model="whisper-1",
@@ -376,6 +377,7 @@ def generate_transcript_segments_from_audio(
                 response_format="verbose_json",
                 language="en",
             )
+        log.info("asr: chunk %d/%d ok seconds=%.1f", idx + 1, total, time.monotonic() - t0)
 
         # Avoid `model_dump()` here: OpenAI's response types are pydantic models and
         # dumping can emit noisy serializer warnings if upstream types drift.

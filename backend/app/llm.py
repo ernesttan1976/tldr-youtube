@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from openai import OpenAI
 
-from .config import OPENAI_API_KEY, OPENAI_MODEL
+from .config import OPENAI_API_KEY, OPENAI_MAX_RETRIES, OPENAI_MODEL, OPENAI_TIMEOUT_SEC
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ def generate_sections_and_markdown(title: str, video_id: str, url: str, transcri
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SEC, max_retries=OPENAI_MAX_RETRIES)
 
     system = (
         "You create study guides for YouTube tutorials. "
