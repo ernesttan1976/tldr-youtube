@@ -4,6 +4,7 @@ pydantic==2.10.3
 python-multipart==0.0.17
 openai==1.60.2
 yt-dlp
+curl-cffi
 srt==3.5.3
 markdown==3.7
 weasyprint==63.0

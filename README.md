@@ -20,7 +20,7 @@ Generated data is stored under `./data/videos/...`.
 Workflow:
 - Click `Attach To Current Tab`
 - If you need members-only/private videos: click `Google Sign-In`, sign in in the browser, then click `Sync Cookies`
-- Click `Generate Draft` (uploads transcript from the page when available, then generates Markdown drafts)
+- Click `Generate Draft` (downloads audio and generates a transcript locally via ASR, then generates Markdown drafts)
 - Edit Markdown and click `Save`
 - Scrub video and use `Capture Now` or `Burst ±10s`
 - Click `Export PDFs` to generate PDFs (only on demand)

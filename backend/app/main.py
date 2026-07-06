@@ -26,7 +26,7 @@ from .storage import (
 from .transcript import (
     TranscriptSegment,
     build_timestamped_minutes,
-    download_transcript_srt,
+    generate_transcript_segments_from_audio,
     parse_srt,
     segments_to_text,
 )
@@ -227,13 +227,12 @@ async def _generate_draft_job(video_id: str) -> None:
                 for s in segs
             ]
         else:
-            srt_path = download_transcript_srt(url, p.root)
-            segments = parse_srt(srt_path)
+            segments = generate_transcript_segments_from_audio(url, p.root)
             p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
             write_json(
                 p.transcript_json,
                 {
-                    "source": srt_path.name,
+                    "source": "asr",
                     "segments": [
                         {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
                     ],

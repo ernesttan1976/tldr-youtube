@@ -78,91 +78,6 @@ async function getContextFromTab() {
   return { tabId: tab.id, ...(result || {}) };
 }
 
-async function extractTranscriptFromPage(tabId) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: async () => {
-      try {
-        const pr = window.ytInitialPlayerResponse || window.ytInitialData?.playerResponse || null;
-        const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-        if (!tracks || !tracks.length) return { ok: false, error: "no captions" };
-
-        const pick =
-          tracks.find((t) => t?.languageCode === "en") ||
-          tracks.find((t) => String(t?.vssId || "").includes(".en")) ||
-          tracks[0];
-        if (!pick?.baseUrl) return { ok: false, error: "missing baseUrl" };
-
-        const base = new URL(pick.baseUrl);
-
-        function parseSrv1(xmlText) {
-          const doc = new DOMParser().parseFromString(xmlText, "text/xml");
-          const nodes = Array.from(doc.querySelectorAll("transcript > text"));
-          const segments = [];
-          for (const n of nodes) {
-            const start = Number(n.getAttribute("start"));
-            const dur = Number(n.getAttribute("dur") || "0");
-            const text = (n.textContent || "").replace(/\s+/g, " ").trim();
-            if (!Number.isFinite(start) || !text) continue;
-            const end = Number.isFinite(dur) ? start + dur : start;
-            segments.push({ startSec: start, endSec: end, text });
-          }
-          return segments;
-        }
-
-        function parseJson3(j) {
-          const events = Array.isArray(j?.events) ? j.events : [];
-          const segments = [];
-          for (const ev of events) {
-            const tStartMs = Number(ev?.tStartMs);
-            const dDurationMs = Number(ev?.dDurationMs || 0);
-            const segs = Array.isArray(ev?.segs) ? ev.segs : [];
-            const text = segs.map((s) => s?.utf8 || "").join("").replace(/\s+/g, " ").trim();
-            if (!Number.isFinite(tStartMs) || !text) continue;
-            const start = tStartMs / 1000;
-            const end = start + (Number.isFinite(dDurationMs) ? dDurationMs / 1000 : 0);
-            segments.push({ startSec: start, endSec: end, text });
-          }
-          return segments;
-        }
-
-        // Prefer srv1 (simple <transcript><text ...>) but fall back to json3.
-        base.searchParams.set("fmt", "srv1");
-        const r1 = await fetch(base.toString());
-        if (!r1.ok) return { ok: false, error: `timedtext HTTP ${r1.status}` };
-        const t1 = await r1.text();
-        let segments = parseSrv1(t1);
-
-        if (!segments.length) {
-          base.searchParams.set("fmt", "json3");
-          const r2 = await fetch(base.toString());
-          if (!r2.ok) return { ok: false, error: `timedtext(json3) HTTP ${r2.status}` };
-          const j = await r2.json();
-          segments = parseJson3(j);
-        }
-
-        if (!segments.length) return { ok: false, error: "empty transcript" };
-        return { ok: true, segments };
-      } catch (e) {
-        return { ok: false, error: String(e) };
-      }
-    }
-  });
-  return result;
-}
-
-async function tryUploadTranscript() {
-  const ctx = await getContextFromTab();
-  if (!ctx?.tabId) return { ok: false, error: "no active tab" };
-  const tr = await extractTranscriptFromPage(ctx.tabId);
-  if (!tr?.ok) return { ok: false, error: tr?.error || "transcript extraction failed" };
-  const resp = await api(`/api/video/${encodeURIComponent(current.videoId)}/transcript`, {
-    method: "PUT",
-    body: JSON.stringify({ segments: tr.segments })
-  });
-  return { ok: true, segments: resp?.segments || tr.segments.length };
-}
 
 async function api(path, opts = {}) {
   const r = await fetch(API + path, {
@@ -355,16 +270,6 @@ async function saveMd() {
 
 async function generateDraft() {
   if (!current.videoId) throw new Error("Attach first");
-
-  // If the backend doesn't already have a transcript, we must upload one from the page.
-  const st0 = await api(`/api/video/${encodeURIComponent(current.videoId)}`);
-  if (!st0?.hasTranscript) {
-    const up = await tryUploadTranscript();
-    if (!up?.ok) {
-      setStatus(`Transcript required but upload failed: ${up?.error || "unknown error"}`);
-      return;
-    }
-  }
 
   const r = await api(`/api/video/${encodeURIComponent(current.videoId)}/generate-draft`, { method: "POST" });
   setStatus(r.status);
