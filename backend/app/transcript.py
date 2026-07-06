@@ -574,7 +574,8 @@ def build_timestamped_minutes(segments: list[TranscriptSegment], max_line_chars:
         combined = " ".join(buckets[minute])
         combined = " ".join(combined.split())
         if len(combined) > max_line_chars:
-            combined = combined[: max_line_chars - 1].rstrip() + "…"
+            # ASCII-only truncation marker to avoid mojibake in terminals/UIs.
+            combined = combined[: max_line_chars - 3].rstrip() + "..."
         lines.append(f"{_fmt_ts(minute * 60)} {combined}")
 
     return "\n".join(lines) + "\n"

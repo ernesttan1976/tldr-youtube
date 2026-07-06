@@ -191,6 +191,7 @@ function setVideoInfo(s) {
 }
 
 function renderMdList(files) {
+  const prev = els.mdSelect.value;
   els.mdSelect.innerHTML = "";
   for (const f of files) {
     const opt = document.createElement("option");
@@ -198,7 +199,17 @@ function renderMdList(files) {
     opt.textContent = f;
     els.mdSelect.appendChild(opt);
   }
-  if (files.includes("index.md")) els.mdSelect.value = "index.md";
+  if (prev && files.includes(prev)) {
+    els.mdSelect.value = prev;
+    return;
+  }
+  if (files.includes("index.md")) {
+    els.mdSelect.value = "index.md";
+    return;
+  }
+  if (files.includes("00_transcript.md")) {
+    els.mdSelect.value = "00_transcript.md";
+  }
 }
 
 function renderShots(videoId, files) {
@@ -308,6 +319,13 @@ async function generateDraft() {
       try {
         const data = JSON.parse(ev.data);
         if (data?.status) setStatus({ ...data.status, hasTranscript: data.hasTranscript, hasSections: data.hasSections });
+        if (Array.isArray(data?.markdown)) {
+          const before = els.mdSelect.value;
+          renderMdList(data.markdown);
+          if (els.mdSelect.value !== before && !String(els.mdEditor.value || "").trim()) {
+            loadMd().catch(() => {});
+          }
+        }
         const st = data?.status?.generation?.state;
         if (st === "done" || st === "error") done();
         lastMsgAt = Date.now();

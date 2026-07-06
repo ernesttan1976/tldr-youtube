@@ -187,6 +187,7 @@ def _merge_generation_status(video_id: str, patch: dict) -> dict:
             "status": status,
             "hasTranscript": p.transcript_txt.exists(),
             "hasSections": p.sections_json.exists(),
+            "markdown": list_files(p.markdown_dir, exts={"md"}),
         },
     )
     return status
@@ -210,8 +211,15 @@ async def stream_video_status(video_id: str) -> StreamingResponse:
                 "status": status,
                 "hasTranscript": p.transcript_txt.exists(),
                 "hasSections": p.sections_json.exists(),
+                "markdown": list_files(p.markdown_dir, exts={"md"}),
             }
             yield f"data: {json.dumps(init)}\n\n"
+
+            # If the client connects after the job already finished, no further events may be published.
+            # Close promptly so the frontend doesn't sit on a keepalive-only stream.
+            gen_state = ((status or {}).get("generation") or {}).get("state")
+            if gen_state in ("done", "error"):
+                return
 
             while True:
                 try:
@@ -446,11 +454,36 @@ async def _generate_draft_job(video_id: str, asr_provider: Literal["openai", "lo
                 },
             )
 
+        # Make transcript immediately viewable in the extension while the LLM is still running.
+        transcript_minutes = build_timestamped_minutes(segments)
+        tmd_lines: list[str] = []
+        for raw in transcript_minutes.splitlines():
+            line = (raw or "").strip()
+            if not line:
+                continue
+            if " " in line:
+                ts, rest = line.split(" ", 1)
+            else:
+                ts, rest = line, ""
+            if rest:
+                tmd_lines.append(f"- **{ts}** {rest}")
+            else:
+                tmd_lines.append(f"- **{ts}**")
+
+        transcript_md = (
+            f"# Transcript (timestamped minutes)\n\n"
+            f"Title: {(meta.get('title') or video_id)}\n\n"
+            f"URL: {url}\n\n"
+            + "\n".join(tmd_lines)
+            + "\n"
+        )
+        (p.markdown_dir / "00_transcript.md").write_text(transcript_md, encoding="utf-8")
+        _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso(), "transcriptMd": "00_transcript.md"})
+
         # LLM output
         step = "llm"
         _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
         log.info("gen[%s] step=%s", video_id, step)
-        transcript_minutes = build_timestamped_minutes(segments)
         log.info("gen[%s] transcript_minutes chars=%d", video_id, len(transcript_minutes))
 
         llm_started = time.monotonic()
@@ -549,6 +582,7 @@ def generate_draft(
 @app.put("/api/video/{video_id}/transcript")
 def put_transcript(video_id: str, req: TranscriptUploadReq) -> dict:
     p = paths_for_video(video_id)
+    meta = read_json(p.metadata_json) if p.metadata_json.exists() else {}
     segs = []
     for s in req.segments:
         try:
@@ -565,6 +599,30 @@ def put_transcript(video_id: str, req: TranscriptUploadReq) -> dict:
 
     write_json(p.transcript_json, {"source": "extension", "segments": segs})
     p.transcript_txt.write_text("\n".join(s["text"] for s in segs) + "\n", encoding="utf-8")
+
+    # Keep the extension usable even without running the LLM.
+    segments = [TranscriptSegment(start_sec=float(s["startSec"]), end_sec=float(s["endSec"]), text=str(s["text"])) for s in segs]
+    transcript_minutes = build_timestamped_minutes(segments)
+    tmd_lines: list[str] = []
+    for raw in transcript_minutes.splitlines():
+        line = (raw or "").strip()
+        if not line:
+            continue
+        if " " in line:
+            ts, rest = line.split(" ", 1)
+        else:
+            ts, rest = line, ""
+        tmd_lines.append(f"- **{ts}** {rest}".rstrip())
+    transcript_md = (
+        f"# Transcript (timestamped minutes)\n\n"
+        f"Title: {(meta.get('title') or video_id)}\n\n"
+        "\n".join(tmd_lines)
+        + "\n"
+    )
+    p.markdown_dir.mkdir(parents=True, exist_ok=True)
+    (p.markdown_dir / "00_transcript.md").write_text(transcript_md, encoding="utf-8")
+
+    _merge_generation_status(video_id, {"updatedAt": _now_iso()})
     return {"ok": True, "segments": len(segs)}
 
 

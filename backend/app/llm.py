@@ -107,8 +107,22 @@ def generate_sections_and_markdown(title: str, video_id: str, url: str, transcri
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise RuntimeError("LLM returned non-object JSON")
+
+    # Be slightly tolerant to key naming drift (helps surface errors as usable output instead of hard-failing).
+    if "sections" not in data:
+        for k in list(data.keys()):
+            if str(k).lower() in ("sections", "section", "chapters", "chapter"):
+                data["sections"] = data[k]
+                break
+    if "indexMd" not in data:
+        for k in list(data.keys()):
+            if str(k).lower() in ("indexmd", "index_md", "indexmarkdown", "index_markdown", "index"):
+                data["indexMd"] = data[k]
+                break
+
     if "sections" not in data or "indexMd" not in data:
-        raise RuntimeError("LLM JSON missing required keys: sections, indexMd")
+        keys = ", ".join(sorted(str(k) for k in data.keys()))
+        raise RuntimeError(f"LLM JSON missing required keys: sections, indexMd (got keys: {keys})")
     if not isinstance(data.get("sections"), list) or not isinstance(data.get("indexMd"), str):
         raise RuntimeError("LLM JSON has invalid types for sections/indexMd")
     sections = data["sections"]
@@ -234,8 +248,21 @@ async def generate_sections_and_markdown_async(
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise RuntimeError("LLM returned non-object JSON")
+
+    if "sections" not in data:
+        for k in list(data.keys()):
+            if str(k).lower() in ("sections", "section", "chapters", "chapter"):
+                data["sections"] = data[k]
+                break
+    if "indexMd" not in data:
+        for k in list(data.keys()):
+            if str(k).lower() in ("indexmd", "index_md", "indexmarkdown", "index_markdown", "index"):
+                data["indexMd"] = data[k]
+                break
+
     if "sections" not in data or "indexMd" not in data:
-        raise RuntimeError("LLM JSON missing required keys: sections, indexMd")
+        keys = ", ".join(sorted(str(k) for k in data.keys()))
+        raise RuntimeError(f"LLM JSON missing required keys: sections, indexMd (got keys: {keys})")
     if not isinstance(data.get("sections"), list) or not isinstance(data.get("indexMd"), str):
         raise RuntimeError("LLM JSON has invalid types for sections/indexMd")
     sections = data["sections"]
