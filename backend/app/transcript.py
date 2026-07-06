@@ -376,12 +376,31 @@ def generate_transcript_segments_from_audio(
                 response_format="verbose_json",
                 language="en",
             )
-        data: dict[str, Any] = tr.model_dump() if hasattr(tr, "model_dump") else json.loads(str(tr))
-        for s in data.get("segments") or []:
+
+        # Avoid `model_dump()` here: OpenAI's response types are pydantic models and
+        # dumping can emit noisy serializer warnings if upstream types drift.
+        raw_segments: Any = getattr(tr, "segments", None)
+        if raw_segments is None:
             try:
-                start = float(s.get("start") or 0.0) + offset
-                end = float(s.get("end") or start) + offset
-                text = str(s.get("text") or "").strip()
+                data: dict[str, Any] = tr.model_dump() if hasattr(tr, "model_dump") else json.loads(str(tr))
+            except Exception:
+                data = {}
+            raw_segments = data.get("segments")
+
+        for s in raw_segments or []:
+            try:
+                if isinstance(s, dict):
+                    start_v = s.get("start")
+                    end_v = s.get("end")
+                    text_v = s.get("text")
+                else:
+                    start_v = getattr(s, "start", None)
+                    end_v = getattr(s, "end", None)
+                    text_v = getattr(s, "text", None)
+
+                start = float(start_v or 0.0) + offset
+                end = float(end_v or start) + offset
+                text = str(text_v or "").strip()
             except Exception:
                 continue
             if not text:
