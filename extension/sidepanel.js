@@ -1,8 +1,14 @@
 const API = "http://127.0.0.1:4711";
 
+const LS_AUTO_SYNC_AUTH = "tldr.autoSyncAuth";
+
 const els = {
   attachBtn: document.getElementById("attachBtn"),
   syncAuthBtn: document.getElementById("syncAuthBtn"),
+  clearAuthBtn: document.getElementById("clearAuthBtn"),
+  signInBtn: document.getElementById("signInBtn"),
+  autoSyncAuth: document.getElementById("autoSyncAuth"),
+  authInfo: document.getElementById("authInfo"),
   refreshBtn: document.getElementById("refreshBtn"),
   generateBtn: document.getElementById("generateBtn"),
   exportBtn: document.getElementById("exportBtn"),
@@ -22,6 +28,16 @@ let current = {
   videoId: null,
   url: null
 };
+
+function loadAutoSyncAuth() {
+  const raw = localStorage.getItem(LS_AUTO_SYNC_AUTH);
+  if (raw == null) return true;
+  return raw === "true";
+}
+
+function saveAutoSyncAuth(v) {
+  localStorage.setItem(LS_AUTO_SYNC_AUTH, v ? "true" : "false");
+}
 
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -165,6 +181,39 @@ async function api(path, opts = {}) {
   return r.text();
 }
 
+function fmtBytes(n) {
+  if (!Number.isFinite(n)) return "";
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
+async function refreshAuthInfo() {
+  if (!els.authInfo) return;
+  try {
+    const st = await api("/api/auth/status");
+    if (!st?.hasCookies) {
+      els.authInfo.textContent = "No synced cookies";
+      return;
+    }
+    const when = st.updatedAt ? new Date(st.updatedAt).toLocaleString() : "";
+    const size = fmtBytes(Number(st.sizeBytes));
+    els.authInfo.textContent = `Synced ${when}${size ? ` (${size})` : ""}`;
+  } catch {
+    els.authInfo.textContent = "Auth status unavailable";
+  }
+}
+
+async function openGoogleSignIn() {
+  // We do not collect or store Google passwords/2FA codes.
+  // User signs in inside the browser, then we sync cookies to the local backend.
+  const url =
+    "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
+  await chrome.tabs.create({ url });
+}
+
 function cookiesGetAll(details) {
   return new Promise((resolve, reject) => {
     chrome.cookies.getAll(details, (cookies) => {
@@ -196,7 +245,14 @@ async function syncAuthCookies() {
     method: "PUT",
     body: JSON.stringify({ cookies: uniq })
   });
+  await refreshAuthInfo();
   return { ok: true, count: r?.count ?? uniq.length };
+}
+
+async function clearAuthCookies() {
+  await api("/api/auth/cookies", { method: "DELETE" });
+  await refreshAuthInfo();
+  return { ok: true };
 }
 
 function setStatus(obj) {
@@ -259,7 +315,9 @@ async function attach() {
   setVideoInfo(`${ctx.videoId}`);
 
   // Best-effort: sync cookies first so backend yt-dlp calls use your session.
-  await syncAuthCookies().catch(() => {});
+  if (els.autoSyncAuth?.checked) {
+    await syncAuthCookies().catch(() => {});
+  }
 
   const st = await api("/api/video/from-url", { method: "POST", body: JSON.stringify({ url: ctx.url }) });
   setStatus({ ...st.status, hasTranscript: st.hasTranscript, hasSections: st.hasSections });
@@ -360,8 +418,15 @@ async function captureBurst() {
 }
 
 function wire() {
+  if (els.autoSyncAuth) {
+    els.autoSyncAuth.checked = loadAutoSyncAuth();
+    els.autoSyncAuth.addEventListener("change", () => saveAutoSyncAuth(els.autoSyncAuth.checked));
+  }
+
+  if (els.signInBtn) els.signInBtn.addEventListener("click", () => openGoogleSignIn().catch((e) => setStatus(String(e))));
   els.attachBtn.addEventListener("click", () => attach().catch((e) => setStatus(String(e))));
   els.syncAuthBtn.addEventListener("click", () => syncAuthCookies().then(setStatus).catch((e) => setStatus(String(e))));
+  if (els.clearAuthBtn) els.clearAuthBtn.addEventListener("click", () => clearAuthCookies().then(setStatus).catch((e) => setStatus(String(e))));
   els.refreshBtn.addEventListener("click", () => refresh().catch((e) => setStatus(String(e))));
   els.loadMdBtn.addEventListener("click", () => loadMd().catch((e) => setStatus(String(e))));
   els.saveMdBtn.addEventListener("click", () => saveMd().catch((e) => setStatus(String(e))));
@@ -372,3 +437,4 @@ function wire() {
 }
 
 wire();
+refreshAuthInfo();

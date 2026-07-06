@@ -13,19 +13,28 @@
         <button id="refreshBtn">Refresh</button>
       </div>
 
-        <div class="card">
-          <div class="row">
-            <div class="label">Video</div>
-            <div id="videoInfo" class="mono">(not loaded)</div>
-          </div>
-          <div class="row">
-            <button id="attachBtn">Attach To Current Tab</button>
-            <button id="syncAuthBtn">Sync Login</button>
-            <button id="generateBtn">Generate Draft</button>
-            <button id="exportBtn">Export PDFs</button>
-          </div>
-          <div id="status" class="status"></div>
+      <div class="card">
+        <div class="row">
+          <div class="label">Video</div>
+          <div id="videoInfo" class="mono">(not loaded)</div>
         </div>
+        <div class="row">
+          <button id="attachBtn">Attach To Current Tab</button>
+          <button id="generateBtn">Generate Draft</button>
+          <button id="exportBtn">Export PDFs</button>
+        </div>
+
+        <div class="row">
+          <div class="label">Auth</div>
+          <label class="chk"><input id="autoSyncAuth" type="checkbox" checked />Auto-sync cookies</label>
+          <button id="signInBtn">Google Sign-In</button>
+          <button id="syncAuthBtn">Sync Cookies</button>
+          <button id="clearAuthBtn">Clear Synced</button>
+          <div id="authInfo" class="mono"></div>
+        </div>
+
+        <div id="status" class="status"></div>
+      </div>
 
       <div class="card">
         <div class="row">

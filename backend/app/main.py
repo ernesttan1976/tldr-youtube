@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -149,6 +150,29 @@ def put_auth_cookies(req: CookiesUploadReq) -> dict:
     cf.parent.mkdir(parents=True, exist_ok=True)
     cf.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"ok": True, "count": len(items)}
+
+
+@app.get("/api/auth/status")
+def get_auth_status() -> dict:
+    cf = cookies_file()
+    if not cf.exists():
+        return {"hasCookies": False}
+    st = cf.stat()
+    updated_at = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    return {
+        "hasCookies": True,
+        "path": str(cf),
+        "updatedAt": updated_at,
+        "sizeBytes": int(st.st_size),
+    }
+
+
+@app.delete("/api/auth/cookies")
+def delete_auth_cookies() -> dict:
+    cf = cookies_file()
+    if cf.exists():
+        cf.unlink()
+    return {"ok": True}
 
 
 @app.post("/api/video/from-url")
