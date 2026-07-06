@@ -20,9 +20,7 @@ const els = {
   loadMdBtn: document.getElementById("loadMdBtn"),
   saveMdBtn: document.getElementById("saveMdBtn"),
   mdEditor: document.getElementById("mdEditor"),
-  shotBtn: document.getElementById("shotBtn"),
-  burstBtn: document.getElementById("burstBtn"),
-  burstInterval: document.getElementById("burstInterval"),
+  autoShotsBtn: document.getElementById("autoShotsBtn"),
   shots: document.getElementById("shots")
 };
 
@@ -374,25 +372,11 @@ async function exportPdf() {
   await refresh();
 }
 
-async function captureNow() {
+async function autoScreenshots() {
   if (!current.videoId) throw new Error("Attach first");
-  const ctx = await getContextFromTab();
-  if (ctx.currentTime == null) throw new Error("No <video> element found");
-  await api(`/api/video/${encodeURIComponent(current.videoId)}/screenshot`, {
+  await api(`/api/video/${encodeURIComponent(current.videoId)}/screenshot/auto`, {
     method: "POST",
-    body: JSON.stringify({ t_sec: ctx.currentTime, format: "png" })
-  });
-  await refresh();
-}
-
-async function captureBurst() {
-  if (!current.videoId) throw new Error("Attach first");
-  const ctx = await getContextFromTab();
-  if (ctx.currentTime == null) throw new Error("No <video> element found");
-  const interval = Number(els.burstInterval.value);
-  await api(`/api/video/${encodeURIComponent(current.videoId)}/screenshot/burst`, {
-    method: "POST",
-    body: JSON.stringify({ center_sec: ctx.currentTime, range_sec: 10, interval_sec: interval, format: "png" })
+    body: JSON.stringify({})
   });
   await refresh();
 }
@@ -417,8 +401,7 @@ function wire() {
   els.saveMdBtn.addEventListener("click", () => saveMd().catch((e) => setStatus(String(e))));
   els.generateBtn.addEventListener("click", () => generateDraft().catch((e) => setStatus(String(e))));
   els.exportBtn.addEventListener("click", () => exportPdf().catch((e) => setStatus(String(e))));
-  els.shotBtn.addEventListener("click", () => captureNow().catch((e) => setStatus(String(e))));
-  els.burstBtn.addEventListener("click", () => captureBurst().catch((e) => setStatus(String(e))));
+  els.autoShotsBtn.addEventListener("click", () => autoScreenshots().catch((e) => setStatus(String(e))));
 }
 
 wire();

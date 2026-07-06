@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .config import ALLOW_ORIGINS, ASR_PROVIDER, OPENAI_TIMEOUT_SEC
 from .llm import generate_sections_and_markdown_async
 from .pdf import markdown_to_pdf
-from .screenshot import burst_times, capture_screenshot, screenshot_name
+from .screenshot import auto_ui_change_times, burst_times, capture_screenshot, screenshot_name
 from .storage import (
     create_or_get_video_dir,
     cookies_file,
@@ -133,6 +133,17 @@ class BurstReq(BaseModel):
     center_sec: float
     range_sec: float = 10.0
     interval_sec: float = 1.0
+    format: Literal["png", "jpg"] = "png"
+
+
+class AutoShotsReq(BaseModel):
+    start_sec: float = 0.0
+    end_sec: float | None = None
+    interval_sec: float = 2.0
+    threshold: int = 14
+    min_gap_sec: float = 15.0
+    stability_window: int = 2
+    stable_dist: int = 6
     format: Literal["png", "jpg"] = "png"
 
 
@@ -680,6 +691,43 @@ def post_screenshot_burst(video_id: str, req: BurstReq) -> dict:
         capture_screenshot(url, t, out, fmt=fmt)
         files.append(name)
     return {"ok": True, "files": files}
+
+
+@app.post("/api/video/{video_id}/screenshot/auto")
+def post_screenshot_auto(video_id: str, req: AutoShotsReq) -> dict:
+    p = paths_for_video(video_id)
+    meta = read_json(p.metadata_json)
+    url = meta.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing video URL")
+
+    fmt = req.format
+    try:
+        times = auto_ui_change_times(
+            url,
+            p.root,
+            start_sec=req.start_sec,
+            end_sec=req.end_sec,
+            interval_sec=req.interval_sec,
+            threshold=req.threshold,
+            min_gap_sec=req.min_gap_sec,
+            stability_window=req.stability_window,
+            stable_dist=req.stable_dist,
+            include_start=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    files: list[str] = []
+    for idx, t in enumerate(times):
+        name = screenshot_name(t, "auto", idx, fmt)
+        out = p.screenshots_dir / name
+        try:
+            capture_screenshot(url, t, out, fmt=fmt)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"capture failed at t={t:.3f}: {e}")
+        files.append(name)
+    return {"ok": True, "files": files, "times": times}
 
 
 @app.get("/api/video/{video_id}/screenshot/{name}")

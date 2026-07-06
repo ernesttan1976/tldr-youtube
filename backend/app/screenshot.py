@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import subprocess
 from pathlib import Path
+from typing import Iterable
 
 from .storage import cookies_file
 from .yt import get_stream_url
@@ -78,11 +79,11 @@ def _ensure_shot_source(url: str, video_dir: Path) -> Path:
 
 
 def capture_screenshot(url: str, t_sec: float, out_path: Path, fmt: str = "png") -> None:
-    # Prefer a locally cached source file (created during ASR) to avoid brittle direct
+    # Prefer a locally cached, video-capable source file to avoid brittle direct
     # access to `googlevideo.com` URLs from ffmpeg.
     # Layout: <video_dir>/screenshots/<file>
     video_dir = out_path.parent.parent
-    local_src = _find_single(video_dir, "asr_source.*")
+    local_src = _find_single(video_dir, "shot_source.*")
     if local_src is not None:
         stream = str(local_src)
     else:
@@ -166,3 +167,187 @@ def screenshot_name(t_sec: float, kind: str, idx: int | None, fmt: str) -> str:
     if idx is None:
         return f"{base}_{kind}.{fmt}"
     return f"{base}_{kind}_{idx:02d}.{fmt}"
+
+
+def _ffprobe_duration_sec(src: str) -> float | None:
+    p = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nk=1:nw=1",
+            src,
+        ]
+    )
+    if p.returncode != 0:
+        return None
+    try:
+        v = float((p.stdout or "").strip())
+        if not math.isfinite(v) or v <= 0:
+            return None
+        return v
+    except Exception:
+        return None
+
+
+def _hamming64(a: int, b: int) -> int:
+    return int((a ^ b).bit_count())
+
+
+def _dhash_9x8_gray(frame72: bytes) -> int:
+    # 9x8 grayscale bytes (row-major). Produces a 64-bit dHash.
+    if len(frame72) != 72:
+        raise ValueError("expected 72 bytes for 9x8 frame")
+    bits = 0
+    k = 0
+    for y in range(8):
+        row = frame72[y * 9 : y * 9 + 9]
+        for x in range(8):
+            if row[x] < row[x + 1]:
+                bits |= 1 << k
+            k += 1
+    return bits
+
+
+def _read_raw_frames_9x8_gray(stream: str, start_sec: float, dur_sec: float, interval_sec: float) -> list[int]:
+    # Emits one 9x8 grayscale frame every interval_sec, then converts each to a dHash.
+    start = max(0.0, float(start_sec))
+    dur = max(0.0, float(dur_sec))
+    interval = max(0.2, float(interval_sec))
+
+    http_args: list[str] = []
+    if "://" in stream:
+        http_args = ["-user_agent", _YT_UA, "-headers", _YT_HEADERS]
+
+    # NOTE: scale to 9x8 so we can compute dHash directly from the raw bytes.
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        *http_args,
+        "-ss",
+        f"{start:.3f}",
+        "-i",
+        stream,
+        "-t",
+        f"{dur:.3f}",
+        "-vf",
+        f"fps=1/{interval:.6f},scale=9:8:flags=fast_bilinear,format=gray",
+        "-pix_fmt",
+        "gray",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = p.communicate()
+    if p.returncode != 0:
+        msg = (err or b"").decode("utf-8", errors="ignore").strip() or "ffmpeg frame sampling failed"
+        raise RuntimeError(msg)
+
+    frame_size = 72
+    n = len(out) // frame_size
+    hashes: list[int] = []
+    for i in range(n):
+        frame = out[i * frame_size : (i + 1) * frame_size]
+        try:
+            hashes.append(_dhash_9x8_gray(frame))
+        except Exception:
+            continue
+    return hashes
+
+
+def auto_ui_change_times(
+    url: str,
+    video_dir: Path,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    interval_sec: float = 2.0,
+    threshold: int = 14,
+    min_gap_sec: float = 15.0,
+    stability_window: int = 2,
+    stable_dist: int = 6,
+    include_start: bool = True,
+) -> list[float]:
+    # UI-change detector based on dHash distance between sampled frames.
+    # It aims to catch persistent interface/layout changes and ignore transient motion.
+    src = _find_single(video_dir, "shot_source.*")
+    if src is None:
+        try:
+            src = _ensure_shot_source(url, video_dir)
+        except Exception:
+            src = None
+
+    stream = str(src) if src is not None else get_stream_url(url)
+
+    dur_total = _ffprobe_duration_sec(stream)
+    start = max(0.0, float(start_sec))
+    if end_sec is None:
+        end = dur_total if dur_total is not None else None
+    else:
+        end = max(start, float(end_sec))
+        if dur_total is not None:
+            end = min(end, dur_total)
+
+    if end is None:
+        # Unknown duration: sample a fixed budget so we don't run forever.
+        end = start + 15 * 60.0
+
+    dur = max(0.0, float(end - start))
+    if dur <= 0.2:
+        return [start] if include_start else []
+
+    hashes = _read_raw_frames_9x8_gray(stream, start, dur, interval_sec)
+    if not hashes:
+        return [start] if include_start else []
+
+    interval = max(0.2, float(interval_sec))
+    times = [start + i * interval for i in range(len(hashes))]
+
+    picked: list[float] = []
+    last_pick_t = -1e9
+    last_pick_h: int | None = None
+    if include_start:
+        picked.append(times[0])
+        last_pick_t = times[0]
+        last_pick_h = hashes[0]
+
+    stab = max(0, int(stability_window))
+    thresh = max(1, int(threshold))
+    min_gap = max(0.0, float(min_gap_sec))
+    stable_d = max(0, int(stable_dist))
+
+    # Greedy scan: detect a big jump from i-1 -> i, then require that i persists for a bit.
+    # This rejects short animations/cursor movement.
+    for i in range(1, len(hashes) - stab):
+        t = times[i]
+        if t - last_pick_t < min_gap:
+            continue
+
+        if _hamming64(hashes[i - 1], hashes[i]) < thresh:
+            continue
+
+        ok = True
+        for j in range(1, stab + 1):
+            if _hamming64(hashes[i], hashes[i + j]) > stable_d:
+                ok = False
+                break
+        if not ok:
+            continue
+
+        if last_pick_h is not None and _hamming64(last_pick_h, hashes[i]) < thresh:
+            continue
+
+        picked.append(t)
+        last_pick_t = t
+        last_pick_h = hashes[i]
+
+    # Clamp to end.
+    return [t for t in picked if t <= end + 0.001]
