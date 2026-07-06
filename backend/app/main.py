@@ -27,6 +27,7 @@ from .storage import (
 from .transcript import (
     TranscriptSegment,
     build_timestamped_minutes,
+    download_transcript_srt,
     generate_transcript_segments_from_audio,
     parse_srt,
     segments_to_text,
@@ -92,6 +93,20 @@ def _video_state(video_id: str) -> dict:
         "screenshots": list_files(p.screenshots_dir, exts={"png", "jpg", "jpeg"}),
         "pdf": list_files(p.pdf_dir, exts={"pdf"}),
     }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _merge_generation_status(video_id: str, patch: dict) -> dict:
+    p = paths_for_video(video_id)
+    status = read_json(p.status_json) if p.status_json.exists() else {"generation": {"state": "idle"}, "pdf": {"state": "idle"}}
+    cur = status.get("generation") or {}
+    cur.update(patch)
+    status["generation"] = cur
+    write_json(p.status_json, status)
+    return status
 
 
 @app.get("/health")
@@ -225,20 +240,29 @@ def get_video(video_id: str) -> dict:
 
 async def _generate_draft_job(video_id: str) -> None:
     p = paths_for_video(video_id)
-    status = read_json(p.status_json)
-    status["generation"] = {"state": "running"}
-    write_json(p.status_json, status)
+    now = _now_iso()
+    _merge_generation_status(
+        video_id,
+        {
+            "state": "running",
+            "step": "init",
+            "startedAt": now,
+            "updatedAt": now,
+        },
+    )
 
     step = "init"
     try:
         meta = read_json(p.metadata_json)
         step = "load_metadata"
+        _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
         url = meta.get("url")
         if not url:
             raise RuntimeError("Missing video URL in metadata")
 
         # Transcript (hard requirement)
         step = "transcript"
+        _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
         if p.transcript_json.exists():
             tj = read_json(p.transcript_json)
             segs = tj.get("segments") or []
@@ -253,21 +277,59 @@ async def _generate_draft_job(video_id: str) -> None:
                 for s in segs
             ]
         else:
-            step = "asr_transcript"
-            segments = generate_transcript_segments_from_audio(url, p.root)
-            p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
-            write_json(
-                p.transcript_json,
-                {
-                    "source": "asr",
-                    "segments": [
-                        {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
-                    ],
-                },
-            )
+            # Prefer YouTube captions first (fast/free), then fall back to ASR (slow/paid).
+            segments: list[TranscriptSegment] | None = None
+
+            step = "download_subtitles"
+            _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+            try:
+                srt_path = download_transcript_srt(url, p.root)
+                segments = parse_srt(srt_path)
+                p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
+                write_json(
+                    p.transcript_json,
+                    {
+                        "source": "yt-dlp-subs",
+                        "segments": [
+                            {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
+                        ],
+                    },
+                )
+            except Exception as e:
+                # If subs fail (no captions, extractor issue, etc.), try ASR.
+                msg = str(e)
+                # For explicit rate-limit errors, don't silently fall back to paid ASR.
+                if "HTTP 429" in msg or "Too Many Requests" in msg or "rate-limited" in msg.lower():
+                    raise
+
+                step = "asr_transcript"
+                _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+
+                def _asr_progress(done: int, total: int) -> None:
+                    _merge_generation_status(
+                        video_id,
+                        {
+                            "step": "asr_transcript",
+                            "updatedAt": _now_iso(),
+                            "asr": {"done": int(done), "total": int(total)},
+                        },
+                    )
+
+                segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress)
+                p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
+                write_json(
+                    p.transcript_json,
+                    {
+                        "source": "asr",
+                        "segments": [
+                            {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
+                        ],
+                    },
+                )
 
         # LLM output
         step = "llm"
+        _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
         transcript_minutes = build_timestamped_minutes(segments)
         sections_json, index_md, section_mds = await asyncio.to_thread(
             generate_sections_and_markdown, meta.get("title") or "", video_id, url, transcript_minutes
@@ -277,28 +339,35 @@ async def _generate_draft_job(video_id: str) -> None:
         for s in section_mds:
             (p.markdown_dir / safe_filename(s.file_name)).write_text(s.md.rstrip() + "\n", encoding="utf-8")
 
-        status = read_json(p.status_json)
-        status["generation"] = {"state": "done"}
-        write_json(p.status_json, status)
+        _merge_generation_status(video_id, {"state": "done", "step": "done", "updatedAt": _now_iso()})
     except Exception as e:
-        status = read_json(p.status_json)
-        status["generation"] = {"state": "error", "step": step, "error": str(e)}
-        write_json(p.status_json, status)
+        _merge_generation_status(
+            video_id,
+            {
+                "state": "error",
+                "step": step,
+                "error": str(e),
+                "updatedAt": _now_iso(),
+            },
+        )
 
 
 @app.post("/api/video/{video_id}/generate-draft")
-def generate_draft(video_id: str, background: BackgroundTasks) -> dict:
+def generate_draft(video_id: str, background: BackgroundTasks, force: bool = False) -> dict:
     try:
         p = paths_for_video(video_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Unknown videoId")
 
     status = read_json(p.status_json)
-    if status.get("generation", {}).get("state") == "running":
+    gen = status.get("generation") or {}
+    # Legacy status files can get stuck at {state: running} forever after a server restart.
+    legacy_stuck_running = gen.get("state") == "running" and not gen.get("startedAt")
+    if gen.get("state") == "running" and not (force or legacy_stuck_running):
         return {"ok": True, "status": status}
 
     background.add_task(_generate_draft_job, video_id)
-    status["generation"] = {"state": "queued"}
+    status["generation"] = {"state": "queued", "queuedAt": _now_iso()}
     write_json(p.status_json, status)
     return {"ok": True, "status": status}
 

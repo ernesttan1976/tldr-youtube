@@ -6,7 +6,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import srt
 from openai import OpenAI
@@ -286,7 +286,11 @@ def _make_asr_chunks(audio_mp3: Path, chunk_sec: int = 300) -> list[Path]:
     return chunks
 
 
-def generate_transcript_segments_from_audio(url: str, video_dir: Path) -> list[TranscriptSegment]:
+def generate_transcript_segments_from_audio(
+    url: str,
+    video_dir: Path,
+    progress: Callable[[int, int], None] | None = None,
+) -> list[TranscriptSegment]:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set (required for ASR transcript generation)")
 
@@ -297,6 +301,13 @@ def generate_transcript_segments_from_audio(url: str, video_dir: Path) -> list[T
 
     segments: list[TranscriptSegment] = []
     chunk_sec = 300.0
+    total = len(chunks)
+    if progress is not None:
+        try:
+            progress(0, total)
+        except Exception:
+            pass
+
     for idx, chunk in enumerate(chunks):
         offset = idx * chunk_sec
         with chunk.open("rb") as f:
@@ -316,6 +327,12 @@ def generate_transcript_segments_from_audio(url: str, video_dir: Path) -> list[T
             if not text:
                 continue
             segments.append(TranscriptSegment(start_sec=start, end_sec=end, text=text))
+
+        if progress is not None:
+            try:
+                progress(idx + 1, total)
+            except Exception:
+                pass
 
     if not segments:
         raise RuntimeError("ASR produced an empty transcript")

@@ -273,11 +273,13 @@ async function generateDraft() {
 
   const r = await api(`/api/video/${encodeURIComponent(current.videoId)}/generate-draft`, { method: "POST" });
   setStatus(r.status);
-  // Poll a bit.
-  for (let i = 0; i < 15; i++) {
-    await new Promise((res) => setTimeout(res, 1500));
+  // Poll for a while (ASR can take minutes on long videos).
+  const start = Date.now();
+  const maxMs = 10 * 60 * 1000;
+  while (Date.now() - start < maxMs) {
+    await new Promise((res) => setTimeout(res, 2500));
     const st = await api(`/api/video/${encodeURIComponent(current.videoId)}`);
-    setStatus(st.status);
+    setStatus({ ...st.status, hasTranscript: st.hasTranscript, hasSections: st.hasSections });
     if (st.status?.generation?.state === "done" || st.status?.generation?.state === "error") break;
   }
   await refresh();
