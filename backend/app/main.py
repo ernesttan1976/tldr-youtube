@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+import subprocess
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,6 +97,28 @@ def _video_state(video_id: str) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
+
+
+@app.get("/api/debug/ytdlp")
+def debug_ytdlp() -> dict:
+    def _cmd(args: list[str]) -> dict:
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, check=False)
+            return {
+                "cmd": args,
+                "code": p.returncode,
+                "stdout": (p.stdout or "").strip()[:8000],
+                "stderr": (p.stderr or "").strip()[:8000],
+            }
+        except Exception as e:
+            return {"cmd": args, "error": str(e)}
+
+    return {
+        "ytDlp": _cmd(["yt-dlp", "--version"]),
+        "ytDlpVerbose": _cmd(["yt-dlp", "--verbose"]),
+        "deno": _cmd(["deno", "--version"]),
+        "node": _cmd(["node", "--version"]),
+    }
 
 
 @app.put("/api/auth/cookies")
@@ -206,13 +229,16 @@ async def _generate_draft_job(video_id: str) -> None:
     status["generation"] = {"state": "running"}
     write_json(p.status_json, status)
 
+    step = "init"
     try:
         meta = read_json(p.metadata_json)
+        step = "load_metadata"
         url = meta.get("url")
         if not url:
             raise RuntimeError("Missing video URL in metadata")
 
         # Transcript (hard requirement)
+        step = "transcript"
         if p.transcript_json.exists():
             tj = read_json(p.transcript_json)
             segs = tj.get("segments") or []
@@ -227,6 +253,7 @@ async def _generate_draft_job(video_id: str) -> None:
                 for s in segs
             ]
         else:
+            step = "asr_transcript"
             segments = generate_transcript_segments_from_audio(url, p.root)
             p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
             write_json(
@@ -240,6 +267,7 @@ async def _generate_draft_job(video_id: str) -> None:
             )
 
         # LLM output
+        step = "llm"
         transcript_minutes = build_timestamped_minutes(segments)
         sections_json, index_md, section_mds = await asyncio.to_thread(
             generate_sections_and_markdown, meta.get("title") or "", video_id, url, transcript_minutes
@@ -254,7 +282,7 @@ async def _generate_draft_job(video_id: str) -> None:
         write_json(p.status_json, status)
     except Exception as e:
         status = read_json(p.status_json)
-        status["generation"] = {"state": "error", "error": str(e)}
+        status["generation"] = {"state": "error", "step": step, "error": str(e)}
         write_json(p.status_json, status)
 
 

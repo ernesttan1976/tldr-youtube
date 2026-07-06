@@ -21,6 +21,22 @@ _SUB_LANG_RE = re.compile(r"^([A-Za-z0-9][\w-]*)\s+")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 
+def _proc_debug(args: list[str], p: subprocess.CompletedProcess[str]) -> str:
+    stdout = (p.stdout or "").strip()
+    stderr = (p.stderr or "").strip()
+    if len(stdout) > 6000:
+        stdout = stdout[:6000] + "\n…(truncated)"
+    if len(stderr) > 6000:
+        stderr = stderr[:6000] + "\n…(truncated)"
+    return (
+        "Command failed\n"
+        f"cmd: {' '.join(args)}\n"
+        f"exit: {p.returncode}\n"
+        f"stdout:\n{stdout}\n\n"
+        f"stderr:\n{stderr}\n"
+    )
+
+
 @dataclass(frozen=True)
 class TranscriptSegment:
     start_sec: float
@@ -182,7 +198,7 @@ def _download_audio_source(url: str, video_dir: Path) -> Path:
 
     p = _run(args, cwd=video_dir)
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or "").strip() or "yt-dlp audio download failed")
+        raise RuntimeError(_proc_debug(args, p))
 
     # yt-dlp wrote asr_source.<ext>
     found = _find_single("asr_source.*", video_dir)
@@ -221,7 +237,7 @@ def _ensure_asr_audio(url: str, video_dir: Path) -> Path:
     ]
     p = _run(cmd, cwd=video_dir)
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or "").strip() or "ffmpeg audio transcode failed")
+        raise RuntimeError(_proc_debug(cmd, p))
 
     # Best-effort cleanup of the source container.
     try:
@@ -262,7 +278,7 @@ def _make_asr_chunks(audio_mp3: Path, chunk_sec: int = 300) -> list[Path]:
     ]
     p = _run(cmd, cwd=audio_mp3.parent)
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or "").strip() or "ffmpeg chunking failed")
+        raise RuntimeError(_proc_debug(cmd, p))
 
     chunks = sorted(chunks_dir.glob("chunk_*.mp3"))
     if not chunks:

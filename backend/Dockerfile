@@ -5,6 +5,8 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    curl \
+    unzip \
     ffmpeg \
     ca-certificates \
     fonts-dejavu-core \
@@ -15,6 +17,11 @@ RUN apt-get update \
     libgdk-pixbuf-2.0-0 \
     shared-mime-info \
   && rm -rf /var/lib/apt/lists/*
+
+# Install a JS runtime for yt-dlp-ejs (YouTube n challenge solving)
+RUN curl -fsSL https://deno.land/install.sh | sh
+
+ENV PATH="/root/.deno/bin:${PATH}"
 
 WORKDIR /app
 
