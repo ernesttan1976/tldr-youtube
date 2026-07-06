@@ -31,8 +31,35 @@ async function getActiveTab() {
 async function getContextFromTab() {
   const tab = await getActiveTab();
   if (!tab?.id) throw new Error("No active tab");
-  const resp = await chrome.tabs.sendMessage(tab.id, { type: "TLDR_GET_CONTEXT" });
-  return { tabId: tab.id, ...resp };
+
+  // Don't rely on content script wiring (it may not be injected yet). Read context via executeScript.
+  // This avoids: "Could not establish connection. Receiving end does not exist."
+  const url = tab.url || "";
+  if (!/^https?:\/\//.test(url)) throw new Error("Active tab URL is not accessible");
+  if (!url.includes("youtube.com/")) throw new Error("Active tab is not a YouTube page");
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => {
+      const href = location.href;
+      let videoId = null;
+      try {
+        const u = new URL(href);
+        videoId = u.searchParams.get("v");
+        if (!videoId) {
+          const m = u.pathname.match(/^\/shorts\/([^/?#]+)/);
+          if (m) videoId = m[1];
+        }
+      } catch {
+        // ignore
+      }
+      const v = document.querySelector("video");
+      const currentTime = v ? v.currentTime : null;
+      return { url: href, videoId, currentTime };
+    }
+  });
+
+  return { tabId: tab.id, ...(result || {}) };
 }
 
 async function extractTranscriptFromPage(tabId) {
