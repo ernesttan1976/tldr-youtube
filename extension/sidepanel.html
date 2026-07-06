@@ -13,16 +13,23 @@
         <button id="refreshBtn">Refresh</button>
       </div>
 
-      <div class="card">
-        <div class="row">
-          <div class="label">Video</div>
-          <div id="videoInfo" class="mono">(not loaded)</div>
-        </div>
-        <div class="row">
-          <button id="attachBtn">Attach To Current Tab</button>
-          <button id="generateBtn">Generate Draft</button>
-          <button id="exportBtn">Export PDFs</button>
-        </div>
+        <div class="card">
+          <div class="row">
+            <div class="label">Video</div>
+            <div id="videoInfo" class="mono">(not loaded)</div>
+          </div>
+          <div class="row">
+            <button id="attachBtn">Attach To Current Tab</button>
+            <label class="inline">
+              <span class="label">ASR</span>
+              <select id="asrProvider">
+                <option value="openai">OpenAI</option>
+                <option value="local">Local</option>
+              </select>
+            </label>
+            <button id="generateBtn">Generate Draft</button>
+            <button id="exportBtn">Export PDFs</button>
+          </div>
 
         <div class="row">
           <div class="label">Auth</div>

@@ -9,6 +9,11 @@ services:
       - DATA_DIR=/data
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - ASR_PROVIDER=${ASR_PROVIDER:-openai}
+      - ASR_LANGUAGE=${ASR_LANGUAGE:-en}
+      - LOCAL_ASR_MODEL=${LOCAL_ASR_MODEL:-small.en}
+      - LOCAL_ASR_DEVICE=${LOCAL_ASR_DEVICE:-cpu}
+      - LOCAL_ASR_COMPUTE_TYPE=${LOCAL_ASR_COMPUTE_TYPE:-int8}
       - HOST=0.0.0.0
       - PORT=4711
       - ALLOW_ORIGINS=${ALLOW_ORIGINS:-*}

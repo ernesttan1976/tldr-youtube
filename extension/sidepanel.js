@@ -1,6 +1,7 @@
 const API = "http://127.0.0.1:4711";
 
 const LS_AUTO_SYNC_AUTH = "tldr.autoSyncAuth";
+const LS_ASR_PROVIDER = "tldr.asrProvider";
 
 const els = {
   attachBtn: document.getElementById("attachBtn"),
@@ -10,6 +11,7 @@ const els = {
   autoSyncAuth: document.getElementById("autoSyncAuth"),
   authInfo: document.getElementById("authInfo"),
   refreshBtn: document.getElementById("refreshBtn"),
+  asrProvider: document.getElementById("asrProvider"),
   generateBtn: document.getElementById("generateBtn"),
   exportBtn: document.getElementById("exportBtn"),
   videoInfo: document.getElementById("videoInfo"),
@@ -37,6 +39,16 @@ function loadAutoSyncAuth() {
 
 function saveAutoSyncAuth(v) {
   localStorage.setItem(LS_AUTO_SYNC_AUTH, v ? "true" : "false");
+}
+
+function loadAsrProvider() {
+  const raw = localStorage.getItem(LS_ASR_PROVIDER);
+  if (raw === "local" || raw === "openai") return raw;
+  return "openai";
+}
+
+function saveAsrProvider(v) {
+  localStorage.setItem(LS_ASR_PROVIDER, v === "local" ? "local" : "openai");
 }
 
 async function getActiveTab() {
@@ -272,7 +284,8 @@ async function generateDraft() {
   if (!current.videoId) throw new Error("Attach first");
 
   const vid = encodeURIComponent(current.videoId);
-  const r = await api(`/api/video/${vid}/generate-draft`, { method: "POST" });
+  const asr = els.asrProvider?.value === "local" ? "local" : "openai";
+  const r = await api(`/api/video/${vid}/generate-draft?asr_provider=${encodeURIComponent(asr)}`, { method: "POST" });
   setStatus({ ...r.status, hasTranscript: false, hasSections: false });
 
   // Stream status updates via SSE (no polling spam).
@@ -370,6 +383,11 @@ function wire() {
   if (els.autoSyncAuth) {
     els.autoSyncAuth.checked = loadAutoSyncAuth();
     els.autoSyncAuth.addEventListener("change", () => saveAutoSyncAuth(els.autoSyncAuth.checked));
+  }
+
+  if (els.asrProvider) {
+    els.asrProvider.value = loadAsrProvider();
+    els.asrProvider.addEventListener("change", () => saveAsrProvider(els.asrProvider.value));
   }
 
   if (els.signInBtn) els.signInBtn.addEventListener("click", () => openGoogleSignIn().catch((e) => setStatus(String(e))));

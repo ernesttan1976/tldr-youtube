@@ -7,5 +7,6 @@ yt-dlp
 yt-dlp-ejs
 curl-cffi
 srt==3.5.3
+faster-whisper==1.0.3
 markdown==3.7
 weasyprint==63.0

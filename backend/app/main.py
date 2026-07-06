@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .config import ALLOW_ORIGINS
+from .config import ALLOW_ORIGINS, ASR_PROVIDER
 from .llm import generate_sections_and_markdown
 from .pdf import markdown_to_pdf
 from .screenshot import burst_times, capture_screenshot, screenshot_name
@@ -370,7 +370,7 @@ def get_video(video_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Unknown videoId")
 
 
-async def _generate_draft_job(video_id: str) -> None:
+async def _generate_draft_job(video_id: str, asr_provider: Literal["openai", "local"] | None = None) -> None:
     p = paths_for_video(video_id)
     log.info("gen[%s] start dir=%s", video_id, p.root)
     _ACTIVE_GENERATIONS.add(video_id)
@@ -431,13 +431,15 @@ async def _generate_draft_job(video_id: str) -> None:
                 )
                 log.info("gen[%s] asr progress %d/%d", video_id, int(done), int(total))
 
-            segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress)
+            resolved_asr = asr_provider or ASR_PROVIDER
+            segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress, asr_provider=resolved_asr)
             log.info("gen[%s] asr segments=%d", video_id, len(segments))
             p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
             write_json(
                 p.transcript_json,
                 {
                     "source": "asr",
+                    "asrProvider": resolved_asr,
                     "segments": [{"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments],
                 },
             )
@@ -481,7 +483,12 @@ async def _generate_draft_job(video_id: str) -> None:
 
 
 @app.post("/api/video/{video_id}/generate-draft")
-def generate_draft(video_id: str, background: BackgroundTasks, force: bool = False) -> dict:
+def generate_draft(
+    video_id: str,
+    background: BackgroundTasks,
+    force: bool = False,
+    asr_provider: Literal["openai", "local"] | None = None,
+) -> dict:
     try:
         p = paths_for_video(video_id)
     except FileNotFoundError:
@@ -506,8 +513,9 @@ def generate_draft(video_id: str, background: BackgroundTasks, force: bool = Fal
     if gen.get("state") == "running" and not actually_running_here and not force:
         log.info("gen[%s] found orphaned running status; re-queueing", video_id)
 
-    background.add_task(_generate_draft_job, video_id)
-    status["generation"] = {"state": "queued", "queuedAt": _now_iso()}
+    resolved_asr = asr_provider or ASR_PROVIDER
+    background.add_task(_generate_draft_job, video_id, resolved_asr)
+    status["generation"] = {"state": "queued", "queuedAt": _now_iso(), "asrProvider": resolved_asr}
     write_json(p.status_json, status)
     log.info("gen[%s] queued", video_id)
     return {"ok": True, "status": status}

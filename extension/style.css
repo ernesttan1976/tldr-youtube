@@ -53,6 +53,16 @@ body {
   transform: translateY(1px);
 }
 
+.inline {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.inline .label {
+  font-weight: 600;
+}
+
 .status {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;

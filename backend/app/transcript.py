@@ -14,7 +14,14 @@ from typing import Any, Callable
 
 import srt
 
-from .config import OPENAI_API_KEY
+from .config import (
+    ASR_LANGUAGE,
+    ASR_PROVIDER,
+    LOCAL_ASR_COMPUTE_TYPE,
+    LOCAL_ASR_DEVICE,
+    LOCAL_ASR_MODEL,
+    OPENAI_API_KEY,
+)
 from .openai_client import create_openai_client
 from .storage import cookies_file
 
@@ -342,14 +349,42 @@ def generate_transcript_segments_from_audio(
     url: str,
     video_dir: Path,
     progress: Callable[[int, int], None] | None = None,
+    asr_provider: str | None = None,
 ) -> list[TranscriptSegment]:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set (required for ASR transcript generation)")
+    provider = (asr_provider or ASR_PROVIDER or "openai").strip().lower()
+    if provider not in ("openai", "local"):
+        raise RuntimeError(f"Unknown ASR provider: {provider}")
+    if provider == "openai" and not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set (required for OpenAI ASR transcript generation)")
 
     audio_mp3 = _ensure_asr_audio(url, video_dir)
     chunks = _make_asr_chunks(audio_mp3)
 
-    client = create_openai_client()
+    client = create_openai_client() if provider == "openai" else None
+
+    fw_model = None
+    if provider == "local":
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "Local ASR is not available. Install backend deps (faster-whisper), or use ASR_PROVIDER=openai.\n\n"
+                + str(e)
+            )
+
+        # Model downloads on first use; cache at the process level.
+        global _FW_MODEL_CACHE  # created below
+        key = (LOCAL_ASR_MODEL, LOCAL_ASR_DEVICE, LOCAL_ASR_COMPUTE_TYPE)
+        fw_model = _FW_MODEL_CACHE.get(key)
+        if fw_model is None:
+            log.info(
+                "asr: local init model=%s device=%s compute=%s",
+                LOCAL_ASR_MODEL,
+                LOCAL_ASR_DEVICE,
+                LOCAL_ASR_COMPUTE_TYPE,
+            )
+            fw_model = WhisperModel(LOCAL_ASR_MODEL, device=LOCAL_ASR_DEVICE, compute_type=LOCAL_ASR_COMPUTE_TYPE)
+            _FW_MODEL_CACHE[key] = fw_model
 
     segments: list[TranscriptSegment] = []
     chunk_sec = 300.0
@@ -397,24 +432,49 @@ def generate_transcript_segments_from_audio(
                 pass
         log.info("asr: chunk %d/%d file=%s bytes=%d", idx + 1, total, chunk.name, int(chunk.stat().st_size))
         t0 = time.monotonic()
-        with chunk.open("rb") as f:
-            tr = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                response_format="verbose_json",
-                language="en",
-            )
-        log.info("asr: chunk %d/%d ok seconds=%.1f", idx + 1, total, time.monotonic() - t0)
+        raw_segments: Any = None
 
-        # Avoid `model_dump()` here: OpenAI's response types are pydantic models and
-        # dumping can emit noisy serializer warnings if upstream types drift.
-        raw_segments: Any = getattr(tr, "segments", None)
-        if raw_segments is None:
-            try:
-                data: dict[str, Any] = tr.model_dump() if hasattr(tr, "model_dump") else json.loads(str(tr))
-            except Exception:
-                data = {}
-            raw_segments = data.get("segments")
+        if provider == "openai":
+            assert client is not None
+            with chunk.open("rb") as f:
+                tr = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    language=ASR_LANGUAGE,
+                )
+            log.info("asr: chunk %d/%d ok provider=openai seconds=%.1f", idx + 1, total, time.monotonic() - t0)
+
+            # Avoid `model_dump()` here: OpenAI's response types are pydantic models and
+            # dumping can emit noisy serializer warnings if upstream types drift.
+            raw_segments = getattr(tr, "segments", None)
+            if raw_segments is None:
+                try:
+                    data: dict[str, Any] = tr.model_dump() if hasattr(tr, "model_dump") else json.loads(str(tr))
+                except Exception:
+                    data = {}
+                raw_segments = data.get("segments")
+        else:
+            assert fw_model is not None
+            # faster-whisper returns segments relative to this chunk.
+            seg_iter, _info = fw_model.transcribe(
+                str(chunk),
+                language=ASR_LANGUAGE or None,
+                vad_filter=True,
+            )
+            raw_segments = []
+            for seg in seg_iter:
+                try:
+                    raw_segments.append(
+                        {
+                            "start": float(getattr(seg, "start", 0.0)),
+                            "end": float(getattr(seg, "end", 0.0)),
+                            "text": str(getattr(seg, "text", "") or "").strip(),
+                        }
+                    )
+                except Exception:
+                    continue
+            log.info("asr: chunk %d/%d ok provider=local seconds=%.1f", idx + 1, total, time.monotonic() - t0)
 
         # Best-effort persist chunk result for resume.
         try:
@@ -452,6 +512,10 @@ def generate_transcript_segments_from_audio(
     if not segments:
         raise RuntimeError("ASR produced an empty transcript")
     return segments
+
+
+# Process-level cache for local ASR models.
+_FW_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
 def parse_srt(path: Path) -> list[TranscriptSegment]:
