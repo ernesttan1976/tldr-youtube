@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic==2.10.3
 python-multipart==0.0.17
 openai==1.60.2
+requests==2.32.3
 yt-dlp
 yt-dlp-ejs
 curl-cffi
