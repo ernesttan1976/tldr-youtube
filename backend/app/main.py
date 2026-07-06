@@ -31,9 +31,7 @@ from .storage import (
 from .transcript import (
     TranscriptSegment,
     build_timestamped_minutes,
-    download_transcript_srt,
     generate_transcript_segments_from_audio,
-    parse_srt,
     segments_to_text,
 )
 from .yt import get_video_info
@@ -408,64 +406,32 @@ async def _generate_draft_job(video_id: str) -> None:
             ]
             log.info("gen[%s] transcript source=%s segments=%d", video_id, tj.get("source"), len(segments))
         else:
-            # Prefer YouTube captions first (fast/free), then fall back to ASR (slow/paid).
-            segments: list[TranscriptSegment] | None = None
-
-            step = "download_subtitles"
+            # Ignore YouTube captions/subtitles entirely; always generate transcript via ASR.
+            step = "asr_transcript"
             _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
             log.info("gen[%s] step=%s", video_id, step)
-            try:
-                srt_path = download_transcript_srt(url, p.root)
-                log.info("gen[%s] subtitles ok file=%s", video_id, srt_path)
-                segments = parse_srt(srt_path)
-                log.info("gen[%s] subtitles segments=%d", video_id, len(segments))
-                p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
-                write_json(
-                    p.transcript_json,
+
+            def _asr_progress(done: int, total: int) -> None:
+                _merge_generation_status(
+                    video_id,
                     {
-                        "source": "yt-dlp-subs",
-                        "segments": [
-                            {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
-                        ],
+                        "step": "asr_transcript",
+                        "updatedAt": _now_iso(),
+                        "asr": {"done": int(done), "total": int(total)},
                     },
                 )
-            except Exception as e:
-                # If subs fail (no captions, extractor issue, etc.), try ASR.
-                msg = str(e)
-                # For explicit rate-limit errors, don't silently fall back to paid ASR.
-                if "HTTP 429" in msg or "Too Many Requests" in msg or "rate-limited" in msg.lower():
-                    log.exception("gen[%s] subtitles failed with rate-limit; not falling back", video_id)
-                    raise
+                log.info("gen[%s] asr progress %d/%d", video_id, int(done), int(total))
 
-                log.exception("gen[%s] subtitles failed; falling back to ASR", video_id)
-
-                step = "asr_transcript"
-                _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
-                log.info("gen[%s] step=%s", video_id, step)
-
-                def _asr_progress(done: int, total: int) -> None:
-                    _merge_generation_status(
-                        video_id,
-                        {
-                            "step": "asr_transcript",
-                            "updatedAt": _now_iso(),
-                            "asr": {"done": int(done), "total": int(total)},
-                        },
-                    )
-                    log.info("gen[%s] asr progress %d/%d", video_id, int(done), int(total))
-
-                segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress)
-                log.info("gen[%s] asr segments=%d", video_id, len(segments))
-                p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
-                write_json(
-                    p.transcript_json,
-                    {
-                        "source": "asr",
-                        "segments": [
-                            {"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments
-                        ],
-                    },
-                )
+            segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress)
+            log.info("gen[%s] asr segments=%d", video_id, len(segments))
+            p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
+            write_json(
+                p.transcript_json,
+                {
+                    "source": "asr",
+                    "segments": [{"startSec": s.start_sec, "endSec": s.end_sec, "text": s.text} for s in segments],
+                },
+            )
 
         # LLM output
         step = "llm"

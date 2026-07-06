@@ -374,6 +374,7 @@ def generate_transcript_segments_from_audio(
                 model="whisper-1",
                 file=f,
                 response_format="verbose_json",
+                language="en",
             )
         data: dict[str, Any] = tr.model_dump() if hasattr(tr, "model_dump") else json.loads(str(tr))
         for s in data.get("segments") or []:
