@@ -226,6 +226,11 @@ def _find_single(prefix: str, video_dir: Path) -> Path | None:
 
 def _download_audio_source(url: str, video_dir: Path) -> Path:
     # Download audio only (source container may be webm/m4a). We'll transcode it for ASR.
+    existing = _find_single("asr_source.*", video_dir)
+    if existing is not None and existing.exists() and existing.stat().st_size > 0:
+        # Reuse prior download to avoid re-hitting YouTube.
+        return existing
+
     out_tpl = str(video_dir / "asr_source.%(ext)s")
     args = [
         "yt-dlp",
@@ -295,12 +300,7 @@ def _ensure_asr_audio(url: str, video_dir: Path) -> Path:
     if code != 0:
         raise RuntimeError("ffmpeg transcode failed\n\n" + tail)
 
-    # Best-effort cleanup of the source container.
-    try:
-        if src.exists():
-            src.unlink()
-    except Exception:
-        pass
+    # Keep the source container if present; it avoids re-downloading if the mp3 is deleted.
     return out
 
 
@@ -354,16 +354,29 @@ def generate_transcript_segments_from_audio(
     provider = (asr_provider or ASR_PROVIDER or "openai").strip().lower()
     if provider not in ("openai", "local"):
         raise RuntimeError(f"Unknown ASR provider: {provider}")
-    if provider == "openai" and not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set (required for OpenAI ASR transcript generation)")
+
+    # Important: allow runs to reuse cached chunk transcripts without requiring the provider to be available.
+    # Only require OPENAI_API_KEY / faster-whisper when we actually need to transcribe a missing chunk.
 
     audio_mp3 = _ensure_asr_audio(url, video_dir)
     chunks = _make_asr_chunks(audio_mp3)
 
-    client = create_openai_client() if provider == "openai" else None
-
+    client = None
     fw_model = None
-    if provider == "local":
+
+    def _get_openai_client():
+        nonlocal client
+        if client is not None:
+            return client
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set (required for OpenAI ASR transcript generation)")
+        client = create_openai_client()
+        return client
+
+    def _get_fw_model():
+        nonlocal fw_model
+        if fw_model is not None:
+            return fw_model
         try:
             from faster_whisper import WhisperModel  # type: ignore
         except Exception as e:
@@ -385,6 +398,7 @@ def generate_transcript_segments_from_audio(
             )
             fw_model = WhisperModel(LOCAL_ASR_MODEL, device=LOCAL_ASR_DEVICE, compute_type=LOCAL_ASR_COMPUTE_TYPE)
             _FW_MODEL_CACHE[key] = fw_model
+        return fw_model
 
     segments: list[TranscriptSegment] = []
     chunk_sec = 300.0
@@ -435,9 +449,9 @@ def generate_transcript_segments_from_audio(
         raw_segments: Any = None
 
         if provider == "openai":
-            assert client is not None
+            client2 = _get_openai_client()
             with chunk.open("rb") as f:
-                tr = client.audio.transcriptions.create(
+                tr = client2.audio.transcriptions.create(
                     model="whisper-1",
                     file=f,
                     response_format="verbose_json",
@@ -455,9 +469,9 @@ def generate_transcript_segments_from_audio(
                     data = {}
                 raw_segments = data.get("segments")
         else:
-            assert fw_model is not None
+            fw_model2 = _get_fw_model()
             # faster-whisper returns segments relative to this chunk.
-            seg_iter, _info = fw_model.transcribe(
+            seg_iter, _info = fw_model2.transcribe(
                 str(chunk),
                 language=ASR_LANGUAGE or None,
                 vad_filter=True,

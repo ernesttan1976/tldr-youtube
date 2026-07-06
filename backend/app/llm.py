@@ -72,24 +72,45 @@ def generate_sections_and_markdown(title: str, video_id: str, url: str, transcri
         "fileName must be like '01_intro.md' (2-digit prefix)."
     )
 
-    resp = client.responses.create(
-        model=OPENAI_MODEL,
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt + "\n\n" + json.dumps(user)},
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "StudyGuide",
-                "schema": schema,
-                "strict": True,
-            }
-        },
-    )
+    raw: str
+    try:
+        # Newer OpenAI SDKs expose the Responses API.
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt + "\n\n" + json.dumps(user)},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "StudyGuide",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        )
+        raw = resp.output_text
+    except AttributeError:
+        # Some installations expose OpenAI() but don't have `client.responses`.
+        # Fall back to chat.completions with JSON mode.
+        cc = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt + "\n\n" + json.dumps(user)},
+            ],
+            response_format={"type": "json_object"},
+        )
+        raw = (cc.choices[0].message.content or "").strip()
 
-    raw = resp.output_text
     data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise RuntimeError("LLM returned non-object JSON")
+    if "sections" not in data or "indexMd" not in data:
+        raise RuntimeError("LLM JSON missing required keys: sections, indexMd")
+    if not isinstance(data.get("sections"), list) or not isinstance(data.get("indexMd"), str):
+        raise RuntimeError("LLM JSON has invalid types for sections/indexMd")
     sections = data["sections"]
     index_md = data["indexMd"]
 
