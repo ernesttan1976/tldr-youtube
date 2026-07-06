@@ -8,6 +8,8 @@ import subprocess
 import logging
 import json
 import threading
+import time
+import contextlib
 from collections.abc import AsyncIterator
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -15,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .config import ALLOW_ORIGINS, ASR_PROVIDER
-from .llm import generate_sections_and_markdown
+from .config import ALLOW_ORIGINS, ASR_PROVIDER, OPENAI_TIMEOUT_SEC
+from .llm import generate_sections_and_markdown_async
 from .pdf import markdown_to_pdf
 from .screenshot import burst_times, capture_screenshot, screenshot_name
 from .storage import (
@@ -450,9 +452,32 @@ async def _generate_draft_job(video_id: str, asr_provider: Literal["openai", "lo
         log.info("gen[%s] step=%s", video_id, step)
         transcript_minutes = build_timestamped_minutes(segments)
         log.info("gen[%s] transcript_minutes chars=%d", video_id, len(transcript_minutes))
-        sections_json, index_md, section_mds = await asyncio.to_thread(
-            generate_sections_and_markdown, meta.get("title") or "", video_id, url, transcript_minutes
+
+        llm_started = time.monotonic()
+        llm_task = asyncio.create_task(
+            generate_sections_and_markdown_async(meta.get("title") or "", video_id, url, transcript_minutes)
         )
+        while True:
+            done, _pending = await asyncio.wait({llm_task}, timeout=5.0)
+            if done:
+                sections_json, index_md, section_mds = llm_task.result()
+                break
+
+            elapsed = time.monotonic() - llm_started
+            _merge_generation_status(
+                video_id,
+                {
+                    "step": "llm",
+                    "updatedAt": _now_iso(),
+                    "llm": {"seconds": int(elapsed)},
+                },
+            )
+            # Hard-stop so a stalled upstream call doesn't leave the job in limbo forever.
+            if elapsed > (OPENAI_TIMEOUT_SEC + 5.0):
+                llm_task.cancel()
+                with contextlib.suppress(Exception):
+                    await llm_task
+                raise TimeoutError(f"LLM timed out after {int(elapsed)}s")
         log.info(
             "gen[%s] llm ok sections=%d files=%d index_chars=%d",
             video_id,

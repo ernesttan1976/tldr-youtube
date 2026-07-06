@@ -9,6 +9,8 @@ services:
       - DATA_DIR=/data
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OPENAI_TIMEOUT_SEC=${OPENAI_TIMEOUT_SEC:-600}
+      - OPENAI_MAX_RETRIES=${OPENAI_MAX_RETRIES:-2}
       - ASR_PROVIDER=${ASR_PROVIDER:-openai}
       - ASR_LANGUAGE=${ASR_LANGUAGE:-en}
       - LOCAL_ASR_MODEL=${LOCAL_ASR_MODEL:-small.en}
