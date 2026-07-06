@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "TLDR YouTube (Local)",
+  "version": "0.1.0",
+  "description": "Local study-guide generator for YouTube tutorials (localhost backend).",
+  "permissions": ["activeTab", "tabs", "sidePanel", "scripting", "cookies"],
+  "host_permissions": [
+    "http://127.0.0.1:4711/*",
+    "http://localhost:4711/*",
+    "https://*.youtube.com/*",
+    "https://*.google.com/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

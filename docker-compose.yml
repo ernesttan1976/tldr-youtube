@@ -1,0 +1,16 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: tldr-youtube-backend
+    ports:
+      - "127.0.0.1:4711:4711"
+    environment:
+      - DATA_DIR=/data
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - HOST=0.0.0.0
+      - PORT=4711
+      - ALLOW_ORIGINS=${ALLOW_ORIGINS:-*}
+    volumes:
+      - ./data:/data
