@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 import subprocess
+import logging
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +37,8 @@ from .yt import get_video_info
 
 
 app = FastAPI(title="tldr-youtube", version="0.1.0")
+
+log = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
     CORSMiddleware,
@@ -240,6 +243,7 @@ def get_video(video_id: str) -> dict:
 
 async def _generate_draft_job(video_id: str) -> None:
     p = paths_for_video(video_id)
+    log.info("gen[%s] start dir=%s", video_id, p.root)
     now = _now_iso()
     _merge_generation_status(
         video_id,
@@ -256,13 +260,16 @@ async def _generate_draft_job(video_id: str) -> None:
         meta = read_json(p.metadata_json)
         step = "load_metadata"
         _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+        log.info("gen[%s] step=%s", video_id, step)
         url = meta.get("url")
         if not url:
             raise RuntimeError("Missing video URL in metadata")
+        log.info("gen[%s] url=%s", video_id, url)
 
         # Transcript (hard requirement)
         step = "transcript"
         _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+        log.info("gen[%s] step=%s", video_id, step)
         if p.transcript_json.exists():
             tj = read_json(p.transcript_json)
             segs = tj.get("segments") or []
@@ -276,15 +283,19 @@ async def _generate_draft_job(video_id: str) -> None:
                 )
                 for s in segs
             ]
+            log.info("gen[%s] transcript source=%s segments=%d", video_id, tj.get("source"), len(segments))
         else:
             # Prefer YouTube captions first (fast/free), then fall back to ASR (slow/paid).
             segments: list[TranscriptSegment] | None = None
 
             step = "download_subtitles"
             _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+            log.info("gen[%s] step=%s", video_id, step)
             try:
                 srt_path = download_transcript_srt(url, p.root)
+                log.info("gen[%s] subtitles ok file=%s", video_id, srt_path)
                 segments = parse_srt(srt_path)
+                log.info("gen[%s] subtitles segments=%d", video_id, len(segments))
                 p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
                 write_json(
                     p.transcript_json,
@@ -300,10 +311,14 @@ async def _generate_draft_job(video_id: str) -> None:
                 msg = str(e)
                 # For explicit rate-limit errors, don't silently fall back to paid ASR.
                 if "HTTP 429" in msg or "Too Many Requests" in msg or "rate-limited" in msg.lower():
+                    log.exception("gen[%s] subtitles failed with rate-limit; not falling back", video_id)
                     raise
+
+                log.exception("gen[%s] subtitles failed; falling back to ASR", video_id)
 
                 step = "asr_transcript"
                 _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+                log.info("gen[%s] step=%s", video_id, step)
 
                 def _asr_progress(done: int, total: int) -> None:
                     _merge_generation_status(
@@ -314,8 +329,10 @@ async def _generate_draft_job(video_id: str) -> None:
                             "asr": {"done": int(done), "total": int(total)},
                         },
                     )
+                    log.info("gen[%s] asr progress %d/%d", video_id, int(done), int(total))
 
                 segments = generate_transcript_segments_from_audio(url, p.root, progress=_asr_progress)
+                log.info("gen[%s] asr segments=%d", video_id, len(segments))
                 p.transcript_txt.write_text(segments_to_text(segments), encoding="utf-8")
                 write_json(
                     p.transcript_json,
@@ -330,9 +347,18 @@ async def _generate_draft_job(video_id: str) -> None:
         # LLM output
         step = "llm"
         _merge_generation_status(video_id, {"step": step, "updatedAt": _now_iso()})
+        log.info("gen[%s] step=%s", video_id, step)
         transcript_minutes = build_timestamped_minutes(segments)
+        log.info("gen[%s] transcript_minutes chars=%d", video_id, len(transcript_minutes))
         sections_json, index_md, section_mds = await asyncio.to_thread(
             generate_sections_and_markdown, meta.get("title") or "", video_id, url, transcript_minutes
+        )
+        log.info(
+            "gen[%s] llm ok sections=%d files=%d index_chars=%d",
+            video_id,
+            len((sections_json or {}).get("sections") or []),
+            len(section_mds or []),
+            len(index_md or ""),
         )
         write_json(p.sections_json, sections_json)
         (p.markdown_dir / "index.md").write_text(index_md.rstrip() + "\n", encoding="utf-8")
@@ -340,6 +366,7 @@ async def _generate_draft_job(video_id: str) -> None:
             (p.markdown_dir / safe_filename(s.file_name)).write_text(s.md.rstrip() + "\n", encoding="utf-8")
 
         _merge_generation_status(video_id, {"state": "done", "step": "done", "updatedAt": _now_iso()})
+        log.info("gen[%s] done", video_id)
     except Exception as e:
         _merge_generation_status(
             video_id,
@@ -350,6 +377,7 @@ async def _generate_draft_job(video_id: str) -> None:
                 "updatedAt": _now_iso(),
             },
         )
+        log.exception("gen[%s] error step=%s", video_id, step)
 
 
 @app.post("/api/video/{video_id}/generate-draft")
@@ -363,12 +391,20 @@ def generate_draft(video_id: str, background: BackgroundTasks, force: bool = Fal
     gen = status.get("generation") or {}
     # Legacy status files can get stuck at {state: running} forever after a server restart.
     legacy_stuck_running = gen.get("state") == "running" and not gen.get("startedAt")
+    log.info(
+        "gen[%s] request force=%s state=%s legacy_stuck_running=%s",
+        video_id,
+        bool(force),
+        gen.get("state"),
+        bool(legacy_stuck_running),
+    )
     if gen.get("state") == "running" and not (force or legacy_stuck_running):
         return {"ok": True, "status": status}
 
     background.add_task(_generate_draft_job, video_id)
     status["generation"] = {"state": "queued", "queuedAt": _now_iso()}
     write_json(p.status_json, status)
+    log.info("gen[%s] queued", video_id)
     return {"ok": True, "status": status}
 
 

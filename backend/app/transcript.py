@@ -4,6 +4,10 @@ import json
 import os
 import re
 import subprocess
+import shlex
+import time
+import logging
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +17,9 @@ from openai import OpenAI
 
 from .config import OPENAI_API_KEY
 from .storage import cookies_file
+
+
+log = logging.getLogger("uvicorn.error")
 
 
 _SUB_LANG_RE = re.compile(r"^([A-Za-z0-9][\w-]*)\s+")
@@ -48,6 +55,37 @@ def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
     return subprocess.run(args, cwd=str(cwd) if cwd else None, capture_output=True, text=True, check=False)
 
 
+def _cmd_str(args: list[str]) -> str:
+    # Avoid shell=True; log a safe, readable command string.
+    return " ".join(shlex.quote(a) for a in args)
+
+
+def _run_live(args: list[str], cwd: Path | None = None, prefix: str = "proc") -> tuple[int, str]:
+    # Stream subprocess output to logs so `docker logs -f` is busy while work is happening.
+    cmd_s = _cmd_str(args)
+    log.info("%s: start cmd=%s cwd=%s", prefix, cmd_s, str(cwd) if cwd else "")
+    t0 = time.time()
+    proc = subprocess.Popen(
+        args,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tail: deque[str] = deque(maxlen=250)
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = (raw or "").rstrip("\n")
+        if line:
+            log.info("%s: %s", prefix, line)
+            tail.append(line)
+    code = proc.wait()
+    dt = time.time() - t0
+    log.info("%s: exit=%s seconds=%.1f", prefix, code, dt)
+    return int(code), "\n".join(tail)
+
+
 def _pick_srt_file(video_dir: Path) -> Path | None:
     srts = sorted(video_dir.glob("*.srt"))
     if not srts:
@@ -77,6 +115,9 @@ def _list_available_sub_langs(url: str, video_dir: Path) -> list[str]:
     args += ["--skip-download", "--list-subs", url]
     p = _run(args, cwd=video_dir)
     if p.returncode != 0:
+        err = (p.stderr or "").strip()
+        if err:
+            log.info("subs:list failed exit=%s stderr=%s", p.returncode, err[:2000])
         return []
 
     langs: list[str] = []
@@ -102,6 +143,7 @@ def _list_available_sub_langs(url: str, video_dir: Path) -> list[str]:
             continue
         if code not in langs:
             langs.append(code)
+    log.info("subs:list langs=%s", ",".join(langs) if langs else "(none)")
     return langs
 
 
@@ -126,6 +168,8 @@ def download_transcript_srt(url: str, video_dir: Path) -> Path:
     args = [
         "yt-dlp",
         "--no-playlist",
+        "--progress",
+        "--newline",
         "--extractor-args",
         "youtube:player_client=web",
         "--user-agent",
@@ -148,9 +192,9 @@ def download_transcript_srt(url: str, video_dir: Path) -> Path:
         url,
     ]
 
-    p = _run(args, cwd=video_dir)
-    if p.returncode != 0:
-        err = (p.stderr or "").strip() or "yt-dlp subtitle download failed"
+    code, tail = _run_live(args, cwd=video_dir, prefix="yt-dlp:subs")
+    if code != 0:
+        err = tail.strip() or "yt-dlp subtitle download failed"
         if "HTTP Error 429" in err or "Too Many Requests" in err:
             raise RuntimeError(
                 "YouTube rate-limited subtitle download (HTTP 429). "
@@ -179,6 +223,8 @@ def _download_audio_source(url: str, video_dir: Path) -> Path:
     args = [
         "yt-dlp",
         "--no-playlist",
+        "--progress",
+        "--newline",
         "--extractor-args",
         "youtube:player_client=web",
         "--user-agent",
@@ -196,9 +242,9 @@ def _download_audio_source(url: str, video_dir: Path) -> Path:
         # Put cookies early so yt-dlp applies it to extractor requests.
         args[1:1] = ["--cookies", str(cf)]
 
-    p = _run(args, cwd=video_dir)
-    if p.returncode != 0:
-        raise RuntimeError(_proc_debug(args, p))
+    code, tail = _run_live(args, cwd=video_dir, prefix="yt-dlp:audio")
+    if code != 0:
+        raise RuntimeError("yt-dlp audio download failed\n\n" + tail)
 
     # yt-dlp wrote asr_source.<ext>
     found = _find_single("asr_source.*", video_dir)
@@ -219,8 +265,11 @@ def _ensure_asr_audio(url: str, video_dir: Path) -> Path:
     cmd = [
         "ffmpeg",
         "-hide_banner",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         "-loglevel",
-        "error",
+        "info",
         "-y",
         "-i",
         str(src),
@@ -235,9 +284,9 @@ def _ensure_asr_audio(url: str, video_dir: Path) -> Path:
         "48k",
         str(out),
     ]
-    p = _run(cmd, cwd=video_dir)
-    if p.returncode != 0:
-        raise RuntimeError(_proc_debug(cmd, p))
+    code, tail = _run_live(cmd, cwd=video_dir, prefix="ffmpeg:asr")
+    if code != 0:
+        raise RuntimeError("ffmpeg transcode failed\n\n" + tail)
 
     # Best-effort cleanup of the source container.
     try:
@@ -261,8 +310,11 @@ def _make_asr_chunks(audio_mp3: Path, chunk_sec: int = 300) -> list[Path]:
     cmd = [
         "ffmpeg",
         "-hide_banner",
+        "-progress",
+        "pipe:1",
+        "-nostats",
         "-loglevel",
-        "error",
+        "info",
         "-y",
         "-i",
         str(audio_mp3),
@@ -276,9 +328,9 @@ def _make_asr_chunks(audio_mp3: Path, chunk_sec: int = 300) -> list[Path]:
         "copy",
         out_tpl,
     ]
-    p = _run(cmd, cwd=audio_mp3.parent)
-    if p.returncode != 0:
-        raise RuntimeError(_proc_debug(cmd, p))
+    code, tail = _run_live(cmd, cwd=audio_mp3.parent, prefix="ffmpeg:chunk")
+    if code != 0:
+        raise RuntimeError("ffmpeg chunking failed\n\n" + tail)
 
     chunks = sorted(chunks_dir.glob("chunk_*.mp3"))
     if not chunks:
@@ -310,6 +362,7 @@ def generate_transcript_segments_from_audio(
 
     for idx, chunk in enumerate(chunks):
         offset = idx * chunk_sec
+        log.info("asr: chunk %d/%d file=%s bytes=%d", idx + 1, total, chunk.name, int(chunk.stat().st_size))
         with chunk.open("rb") as f:
             tr = client.audio.transcriptions.create(
                 model="whisper-1",
