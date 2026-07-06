@@ -204,6 +204,24 @@ def _merge_generation_status(video_id: str, patch: dict) -> dict:
     return status
 
 
+def _merge_status_root(video_id: str, patch: dict) -> dict:
+    p = paths_for_video(video_id)
+    status = read_json(p.status_json) if p.status_json.exists() else {"generation": {"state": "idle"}, "pdf": {"state": "idle"}}
+    status.update(patch)
+    write_json(p.status_json, status)
+    _publish_status(
+        video_id,
+        {
+            "videoId": video_id,
+            "status": status,
+            "hasTranscript": p.transcript_txt.exists(),
+            "hasSections": p.sections_json.exists(),
+            "markdown": list_files(p.markdown_dir, exts={"md"}),
+        },
+    )
+    return status
+
+
 @app.get("/api/video/{video_id}/status/stream")
 async def stream_video_status(video_id: str) -> StreamingResponse:
     # SSE stream of status updates. Emits an initial snapshot immediately.
@@ -694,40 +712,101 @@ def post_screenshot_burst(video_id: str, req: BurstReq) -> dict:
 
 
 @app.post("/api/video/{video_id}/screenshot/auto")
-def post_screenshot_auto(video_id: str, req: AutoShotsReq) -> dict:
+def post_screenshot_auto(video_id: str, req: AutoShotsReq, background: BackgroundTasks) -> dict:
+    # Run in the background: auto-detect + capture can take a while, and we don't want
+    # the sidepanel to look "stuck" waiting on a long request.
     p = paths_for_video(video_id)
     meta = read_json(p.metadata_json)
     url = meta.get("url")
     if not url:
         raise HTTPException(status_code=400, detail="Missing video URL")
 
-    fmt = req.format
-    try:
-        times = auto_ui_change_times(
-            url,
-            p.root,
-            start_sec=req.start_sec,
-            end_sec=req.end_sec,
-            interval_sec=req.interval_sec,
-            threshold=req.threshold,
-            min_gap_sec=req.min_gap_sec,
-            stability_window=req.stability_window,
-            stable_dist=req.stable_dist,
-            include_start=True,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    st = read_json(p.status_json) if p.status_json.exists() else {"generation": {"state": "idle"}, "pdf": {"state": "idle"}}
+    cur = (st.get("screenshotsAuto") or {}).get("state")
+    if cur == "running":
+        return {"ok": True, "status": st}
 
-    files: list[str] = []
-    for idx, t in enumerate(times):
-        name = screenshot_name(t, "auto", idx, fmt)
-        out = p.screenshots_dir / name
+    def _job() -> None:
         try:
-            capture_screenshot(url, t, out, fmt=fmt)
+            _merge_status_root(
+                video_id,
+                {
+                    "screenshotsAuto": {
+                        "state": "running",
+                        "updatedAt": _now_iso(),
+                        "params": {
+                            "start_sec": req.start_sec,
+                            "end_sec": req.end_sec,
+                            "interval_sec": req.interval_sec,
+                            "threshold": req.threshold,
+                            "min_gap_sec": req.min_gap_sec,
+                            "stability_window": req.stability_window,
+                            "stable_dist": req.stable_dist,
+                            "format": req.format,
+                        },
+                    }
+                },
+            )
+
+            times = auto_ui_change_times(
+                url,
+                p.root,
+                start_sec=req.start_sec,
+                end_sec=req.end_sec,
+                interval_sec=req.interval_sec,
+                threshold=req.threshold,
+                min_gap_sec=req.min_gap_sec,
+                stability_window=req.stability_window,
+                stable_dist=req.stable_dist,
+                include_start=True,
+            )
+
+            fmt = req.format
+            total = len(times)
+            files: list[str] = []
+            for idx, t in enumerate(times):
+                _merge_status_root(
+                    video_id,
+                    {
+                        "screenshotsAuto": {
+                            "state": "running",
+                            "updatedAt": _now_iso(),
+                            "progress": {"done": idx, "total": total},
+                        }
+                    },
+                )
+                name = screenshot_name(t, "auto", idx, fmt)
+                out = p.screenshots_dir / name
+                capture_screenshot(url, t, out, fmt=fmt)
+                files.append(name)
+
+            _merge_status_root(
+                video_id,
+                {
+                    "screenshotsAuto": {
+                        "state": "done",
+                        "updatedAt": _now_iso(),
+                        "progress": {"done": total, "total": total},
+                        "files": files,
+                        "times": times,
+                    }
+                },
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"capture failed at t={t:.3f}: {e}")
-        files.append(name)
-    return {"ok": True, "files": files, "times": times}
+            _merge_status_root(
+                video_id,
+                {
+                    "screenshotsAuto": {
+                        "state": "error",
+                        "updatedAt": _now_iso(),
+                        "error": str(e),
+                    }
+                },
+            )
+
+    background.add_task(_job)
+    status = _merge_status_root(video_id, {"screenshotsAuto": {"state": "queued", "updatedAt": _now_iso()}})
+    return {"ok": True, "status": status}
 
 
 @app.get("/api/video/{video_id}/screenshot/{name}")

@@ -374,11 +374,22 @@ async function exportPdf() {
 
 async function autoScreenshots() {
   if (!current.videoId) throw new Error("Attach first");
+  setStatus("Auto-generating screenshots...");
   await api(`/api/video/${encodeURIComponent(current.videoId)}/screenshot/auto`, {
     method: "POST",
     body: JSON.stringify({})
   });
-  await refresh();
+
+  // Poll until done/error so the UI doesn't look like it did nothing.
+  for (let i = 0; i < 60; i++) {
+    await new Promise((res) => setTimeout(res, 2000));
+    const st = await api(`/api/video/${encodeURIComponent(current.videoId)}`);
+    setStatus({ ...st.status, hasTranscript: st.hasTranscript, hasSections: st.hasSections });
+    renderMdList(st.markdown);
+    renderShots(st.videoId, st.screenshots);
+    const s = st.status?.screenshotsAuto?.state;
+    if (s === "done" || s === "error") break;
+  }
 }
 
 function wire() {
@@ -401,7 +412,7 @@ function wire() {
   els.saveMdBtn.addEventListener("click", () => saveMd().catch((e) => setStatus(String(e))));
   els.generateBtn.addEventListener("click", () => generateDraft().catch((e) => setStatus(String(e))));
   els.exportBtn.addEventListener("click", () => exportPdf().catch((e) => setStatus(String(e))));
-  els.autoShotsBtn.addEventListener("click", () => autoScreenshots().catch((e) => setStatus(String(e))));
+  if (els.autoShotsBtn) els.autoShotsBtn.addEventListener("click", () => autoScreenshots().catch((e) => setStatus(String(e))));
 }
 
 wire();

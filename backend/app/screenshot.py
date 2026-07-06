@@ -87,12 +87,12 @@ def capture_screenshot(url: str, t_sec: float, out_path: Path, fmt: str = "png")
     if local_src is not None:
         stream = str(local_src)
     else:
-        # If the video hasn't been processed yet, download a small local source for screenshots.
-        # Falling back to direct stream URLs is brittle (ffmpeg often gets 403 from googlevideo).
+        # Prefer using a direct stream URL so we don't block on downloading a full local file.
+        # If that fails (403/expiry/etc), fall back to downloading a small local source.
         try:
-            stream = str(_ensure_shot_source(url, video_dir))
-        except Exception:
             stream = get_stream_url(url)
+        except Exception:
+            stream = str(_ensure_shot_source(url, video_dir))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out = str(out_path)
@@ -278,13 +278,9 @@ def auto_ui_change_times(
 ) -> list[float]:
     # UI-change detector based on dHash distance between sampled frames.
     # It aims to catch persistent interface/layout changes and ignore transient motion.
+    # Prefer direct stream URL first so we don't block on downloading the full video.
+    # If ffmpeg can't read the stream URL reliably, fall back to a local shot_source.*.
     src = _find_single(video_dir, "shot_source.*")
-    if src is None:
-        try:
-            src = _ensure_shot_source(url, video_dir)
-        except Exception:
-            src = None
-
     stream = str(src) if src is not None else get_stream_url(url)
 
     dur_total = _ffprobe_duration_sec(stream)
@@ -304,7 +300,12 @@ def auto_ui_change_times(
     if dur <= 0.2:
         return [start] if include_start else []
 
-    hashes = _read_raw_frames_9x8_gray(stream, start, dur, interval_sec)
+    try:
+        hashes = _read_raw_frames_9x8_gray(stream, start, dur, interval_sec)
+    except Exception:
+        # Last resort: download a local video source and retry.
+        stream = str(_ensure_shot_source(url, video_dir))
+        hashes = _read_raw_frames_9x8_gray(stream, start, dur, interval_sec)
     if not hashes:
         return [start] if include_start else []
 
