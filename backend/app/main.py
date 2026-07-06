@@ -229,7 +229,16 @@ async def stream_video_status(video_id: str) -> StreamingResponse:
                     if not s:
                         _STATUS_SUBS.pop(video_id, None)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            # Reduce the chance of intermediary/proxy buffering killing the stream.
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/health")

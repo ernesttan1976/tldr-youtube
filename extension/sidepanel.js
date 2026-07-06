@@ -278,8 +278,16 @@ async function generateDraft() {
   // Stream status updates via SSE (no polling spam).
   await new Promise((resolve) => {
     const es = new EventSource(`${API}/api/video/${vid}/status/stream`);
+    let lastMsgAt = Date.now();
+    let hadError = false;
+    let pollTimer = null;
+
     const done = () => {
       try { es.close(); } catch {}
+      if (pollTimer) {
+        try { clearInterval(pollTimer); } catch {}
+        pollTimer = null;
+      }
       resolve();
     };
 
@@ -289,12 +297,31 @@ async function generateDraft() {
         if (data?.status) setStatus({ ...data.status, hasTranscript: data.hasTranscript, hasSections: data.hasSections });
         const st = data?.status?.generation?.state;
         if (st === "done" || st === "error") done();
+        lastMsgAt = Date.now();
+        hadError = false;
       } catch {
         // ignore
       }
     };
 
-    es.onerror = () => done();
+    es.onerror = () => {
+      // Don't close on error: EventSource auto-reconnects, and browsers may fire onerror during retries.
+      // If we haven't received anything for a while, fall back to occasional polling so UI still updates.
+      hadError = true;
+    };
+
+    pollTimer = setInterval(async () => {
+      if (!hadError) return;
+      if (Date.now() - lastMsgAt < 20000) return;
+      try {
+        const st = await api(`/api/video/${vid}`);
+        setStatus({ ...st.status, hasTranscript: st.hasTranscript, hasSections: st.hasSections });
+        const s = st?.status?.generation?.state;
+        if (s === "done" || s === "error") done();
+      } catch {
+        // ignore
+      }
+    }, 5000);
   });
 
   await refresh();

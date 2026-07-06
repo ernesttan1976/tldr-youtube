@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import srt
-from openai import OpenAI
 
-from .config import OPENAI_API_KEY, OPENAI_MAX_RETRIES, OPENAI_TIMEOUT_SEC
+from .config import OPENAI_API_KEY
+from .openai_client import create_openai_client
 from .storage import cookies_file
 
 
@@ -349,7 +349,7 @@ def generate_transcript_segments_from_audio(
     audio_mp3 = _ensure_asr_audio(url, video_dir)
     chunks = _make_asr_chunks(audio_mp3)
 
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SEC, max_retries=OPENAI_MAX_RETRIES)
+    client = create_openai_client()
 
     segments: list[TranscriptSegment] = []
     chunk_sec = 300.0
@@ -362,6 +362,33 @@ def generate_transcript_segments_from_audio(
 
     for idx, chunk in enumerate(chunks):
         offset = idx * chunk_sec
+
+        # Chunk-level cache so restarts can resume without re-transcribing earlier chunks.
+        cache_path = chunk.with_name(chunk.stem + ".asr.json")
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                raw_segments = cached.get("segments")
+                if isinstance(raw_segments, list) and raw_segments:
+                    for s in raw_segments:
+                        try:
+                            start = float((s or {}).get("start", 0.0)) + offset
+                            end = float((s or {}).get("end", start)) + offset
+                            text = str((s or {}).get("text", "")).strip()
+                        except Exception:
+                            continue
+                        if text:
+                            segments.append(TranscriptSegment(start_sec=start, end_sec=end, text=text))
+
+                    if progress is not None:
+                        try:
+                            progress(idx + 1, total)
+                        except Exception:
+                            pass
+                    continue
+            except Exception:
+                # Ignore corrupt cache; fall through to re-transcribe.
+                pass
         if progress is not None:
             try:
                 # Heartbeat before the potentially-long OpenAI call.
@@ -388,6 +415,13 @@ def generate_transcript_segments_from_audio(
             except Exception:
                 data = {}
             raw_segments = data.get("segments")
+
+        # Best-effort persist chunk result for resume.
+        try:
+            if isinstance(raw_segments, list) and raw_segments:
+                cache_path.write_text(json.dumps({"segments": raw_segments}), encoding="utf-8")
+        except Exception:
+            pass
 
         for s in raw_segments or []:
             try:

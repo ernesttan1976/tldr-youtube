@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from openai import OpenAI
-
-from .config import OPENAI_API_KEY, OPENAI_MAX_RETRIES, OPENAI_MODEL, OPENAI_TIMEOUT_SEC
+from .config import OPENAI_MODEL
+from .openai_client import create_openai_client
 
 
 @dataclass(frozen=True)
@@ -18,10 +17,7 @@ class SectionMd:
 
 
 def generate_sections_and_markdown(title: str, video_id: str, url: str, transcript_minutes: str) -> tuple[dict, str, list[SectionMd]]:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set")
-
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT_SEC, max_retries=OPENAI_MAX_RETRIES)
+    client = create_openai_client()
 
     system = (
         "You create study guides for YouTube tutorials. "
